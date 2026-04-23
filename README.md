@@ -94,8 +94,6 @@ into a script, notebook, or REPL.
 
 ### Smooth 2D geometry
 
-![Smooth 2D geometry and boundary-refined domain nodes](docs/readme_assets/geometry_domain.png)
-
 ```python
 import matplotlib.pyplot as plt
 import numpy as np
@@ -139,6 +137,8 @@ plt.show()
 ```
 
 ### Geometry-clipped boundary-refined nodes
+
+![Geometry-clipped boundary-refined nodes](docs/readme_assets/geometry_domain.png)
 
 ```python
 import matplotlib.pyplot as plt

@@ -20,15 +20,18 @@ OUTDIR = ROOT / "docs" / "readme_assets"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 
-def build_domain(*, do_outer_refinement: bool = True) -> tuple[EmbeddedSurface, object]:
-    t = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+def build_surface(n_sites: int, geom_radius: float) -> EmbeddedSurface:
+    t = np.linspace(0.0, 2.0 * np.pi, n_sites, endpoint=False)
     curve = np.column_stack([np.cos(t), 0.7 * np.sin(t)])
-
     surface = EmbeddedSurface()
     surface.set_data_sites(curve)
-    surface.build_closed_geometric_model_ps(2, 0.06, curve.shape[0])
+    surface.build_closed_geometric_model_ps(2, geom_radius, curve.shape[0])
     surface.build_level_set_from_geometric_model()
+    return surface
 
+
+def build_domain(*, do_outer_refinement: bool = True) -> tuple[EmbeddedSurface, object]:
+    surface = build_surface(120, 0.06)
     generator = DomainNodeGenerator()
     domain = generator.build_domain_descriptor_from_geometry(
         surface,
@@ -205,10 +208,20 @@ def save_diffusion(domain) -> Path:
 
 
 def main() -> None:
-    surface, geometry_domain = build_domain(do_outer_refinement=True)
+    geometry_surface = build_surface(50, 0.05)
+    geometry_generator = DomainNodeGenerator()
+    geometry_domain = geometry_generator.build_domain_descriptor_from_geometry(
+        geometry_surface,
+        0.08,
+        seed=17,
+        strip_count=5,
+        do_outer_refinement=True,
+        outer_fraction_of_h=0.5,
+        outer_refinement_zone_size_as_multiple_of_h=2.0,
+    )
     _, solver_domain = build_domain(do_outer_refinement=True)
     paths = [
-        save_geometry(surface, geometry_domain),
+        save_geometry(geometry_surface, geometry_domain),
         save_poisson(solver_domain),
         save_diffusion(solver_domain),
     ]
