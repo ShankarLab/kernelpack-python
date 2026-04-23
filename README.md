@@ -95,6 +95,7 @@ into a script, notebook, or REPL.
 ### Smooth 2D geometry
 
 ```python
+import matplotlib.pyplot as plt
 import numpy as np
 
 from kernelpack.geometry import EmbeddedSurface
@@ -112,11 +113,36 @@ surface.build_level_set_from_geometric_model()
 # Extract boundary samples and normals from the fitted representation.
 xb = surface.get_sample_sites()
 nrmls = surface.get_nrmls()
+
+# Plot the fitted boundary samples and normals.
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.plot(curve[:, 0], curve[:, 1], "ko", ms=3, label="input sites")
+ax.plot(xb[:, 0], xb[:, 1], ".", color="tab:teal", ms=4, label="boundary samples")
+step = max(1, xb.shape[0] // 40)
+ax.quiver(
+    xb[::step, 0],
+    xb[::step, 1],
+    nrmls[::step, 0],
+    nrmls[::step, 1],
+    angles="xy",
+    scale_units="xy",
+    scale=18,
+    color="tab:red",
+    width=0.003,
+)
+ax.set_aspect("equal", adjustable="box")
+ax.grid(alpha=0.2)
+ax.legend(frameon=False)
+plt.show()
 ```
+
+![Smooth 2D geometry and domain](docs/readme_assets/geometry_domain.png)
 
 ### Geometry-clipped interior nodes
 
 ```python
+import matplotlib.pyplot as plt
+
 from kernelpack.nodes import DomainNodeGenerator
 
 # Generate an interior-plus-boundary domain from a geometry and target spacing.
@@ -135,6 +161,16 @@ domain = generator.build_domain_descriptor_from_geometry(
 xi = domain.get_interior_nodes()
 xb = domain.get_bdry_nodes()
 xg = domain.get_ghost_nodes()
+
+# Visualize the packed node sets.
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.plot(xi[:, 0], xi[:, 1], ".", ms=3, color="tab:blue", label="interior")
+ax.plot(xb[:, 0], xb[:, 1], ".", ms=3, color="tab:teal", label="boundary")
+ax.plot(xg[:, 0], xg[:, 1], ".", ms=3, color="goldenrod", label="ghost")
+ax.set_aspect("equal", adjustable="box")
+ax.grid(alpha=0.2)
+ax.legend(frameon=False)
+plt.show()
 ```
 
 ### RBF-FD operator assembly
@@ -164,6 +200,8 @@ L = assembler.get_op()
 ### End-to-end Poisson solve with pure Neumann data
 
 ```python
+import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 import numpy as np
 
 from kernelpack.geometry import EmbeddedSurface
@@ -222,11 +260,34 @@ x_phys = domain.get_int_bdry_nodes()
 u = result["u"]
 u_true = u_exact(x_phys)
 u = u - np.mean(u - u_true)
+err = u - u_true
+
+# Plot the solution and its nodal error.
+tri = mtri.Triangulation(x_phys[:, 0], x_phys[:, 1])
+fig, axes = plt.subplots(2, 1, figsize=(6.5, 8), constrained_layout=True)
+cf0 = axes[0].tricontourf(tri, u, levels=24, cmap="viridis")
+axes[0].plot(domain.get_bdry_nodes()[:, 0], domain.get_bdry_nodes()[:, 1], "k.", ms=1.5, alpha=0.5)
+axes[0].set_title("Poisson solution")
+fig.colorbar(cf0, ax=axes[0], shrink=0.9)
+
+cf1 = axes[1].tricontourf(tri, err, levels=24, cmap="coolwarm")
+axes[1].set_title(f"Poisson error, max |e| = {np.max(np.abs(err)):.2e}")
+fig.colorbar(cf1, ax=axes[1], shrink=0.9)
+
+for ax in axes:
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(alpha=0.15)
+
+plt.show()
 ```
+
+![Poisson solution and error](docs/readme_assets/poisson_solution.png)
 
 ### Diffusion stepping
 
 ```python
+import matplotlib.pyplot as plt
+import matplotlib.tri as mtri
 import numpy as np
 
 from kernelpack.solvers import DiffusionSolver
@@ -281,7 +342,37 @@ for step in range(1, nsteps + 1):
 u_final = states[-1]
 u_true_final = u_exact(t_final, x_phys)
 max_error = np.max(np.abs(u_final - u_true_final))
+err = u_final - u_true_final
+
+# Plot the final state, final-time error, and time history of the max nodal error.
+tri = mtri.Triangulation(x_phys[:, 0], x_phys[:, 1])
+fig = plt.figure(figsize=(8, 8), constrained_layout=True)
+axes = fig.subplot_mosaic([["solution", "error"], ["history", "history"]])
+
+cf0 = axes["solution"].tricontourf(tri, u_final, levels=24, cmap="viridis")
+axes["solution"].set_title(f"Diffusion at t = {t_final:.2f}")
+fig.colorbar(cf0, ax=axes["solution"], shrink=0.85)
+
+cf1 = axes["error"].tricontourf(tri, err, levels=24, cmap="coolwarm")
+axes["error"].set_title(f"Final-time error, max |e| = {max_error:.2e}")
+fig.colorbar(cf1, ax=axes["error"], shrink=0.85)
+
+error_history = [np.max(np.abs(state - u_exact(time, x_phys))) for time, state in zip(times, states)]
+axes["history"].plot(times, error_history, color="tab:blue", lw=2)
+axes["history"].scatter(times, error_history, color="tab:teal", s=18)
+axes["history"].set_xlabel("t")
+axes["history"].set_ylabel("max nodal error")
+axes["history"].set_title("Time march to final time")
+axes["history"].grid(alpha=0.2)
+
+for key in ("solution", "error"):
+    axes[key].set_aspect("equal", adjustable="box")
+    axes[key].grid(alpha=0.15)
+
+plt.show()
 ```
+
+![Diffusion solution, error, and time history](docs/readme_assets/diffusion_solution.png)
 
 ## Package tour
 
@@ -375,7 +466,7 @@ introducing a separate abstraction stack.
 
 ## Design notes
 
-The port aims to preserve the Matlab project’s logic while still feeling
+The port aims to preserve the Matlab project's logic while still feeling
 native in Python:
 
 - snake_case API names instead of Matlab camel case
