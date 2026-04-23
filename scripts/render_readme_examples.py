@@ -72,7 +72,7 @@ def save_geometry(surface, domain) -> Path:
     axes["domain"].plot(xb[:, 0], xb[:, 1], ".", color="#0f766e", ms=3, label="Boundary")
     axes["domain"].plot(xg[:, 0], xg[:, 1], ".", color="#f59e0b", ms=3, label="Ghost")
     axes["domain"].legend(frameon=False, fontsize=9)
-    axes["domain"].set_title("Interior, Boundary, and Ghost Nodes")
+    axes["domain"].set_title("Boundary-Refined Interior, Boundary, and Ghost Nodes")
 
     for ax in axes.values():
         ax.set_aspect("equal", adjustable="box")
@@ -205,7 +205,7 @@ def save_diffusion(domain) -> Path:
 
 
 def main() -> None:
-    surface, geometry_domain = build_domain(do_outer_refinement=False)
+    surface, geometry_domain = build_domain(do_outer_refinement=True)
     _, solver_domain = build_domain(do_outer_refinement=True)
     paths = [
         save_geometry(surface, geometry_domain),
