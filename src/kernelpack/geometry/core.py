@@ -107,6 +107,38 @@ def weighted_sample_elimination_mis(x: np.ndarray, radius: float) -> np.ndarray:
     return keep
 
 
+def resample_closed_curve_by_arc_length(curve: np.ndarray, target_count: int) -> np.ndarray:
+    curve = np.asarray(curve, dtype=float)
+    n = curve.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.uint32)
+    if n == 1 or target_count <= 1:
+        return np.array([0], dtype=np.uint32)
+
+    shifted = np.vstack([curve[1:], curve[:1]])
+    seg_lens = np.linalg.norm(shifted - curve, axis=1)
+    total = float(seg_lens.sum())
+    if total <= np.finfo(float).eps:
+        count = min(n, target_count)
+        return np.unique(np.round(np.linspace(0, n - 1, count)).astype(np.uint32))
+
+    cum_len = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    targets = np.arange(target_count, dtype=float) * (total / target_count)
+    inds = np.zeros(target_count, dtype=np.uint32)
+    for k, target in enumerate(targets):
+        idx = int(np.searchsorted(cum_len, target, side="right") - 1)
+        idx = min(max(idx, 0), n - 1)
+        next_idx = (idx + 1) % n
+        if idx < n - 1:
+            if abs(cum_len[idx + 1] - target) < abs(cum_len[idx] - target):
+                idx += 1
+        else:
+            if abs(total - target) < abs(cum_len[idx] - target):
+                idx = next_idx
+        inds[k] = np.uint32(idx)
+    return np.unique(inds)
+
+
 def project_to_best_fit_plane(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     x = np.asarray(x, dtype=float)
     origin = x.mean(axis=0)
@@ -328,16 +360,23 @@ class EmbeddedSurface:
             self.geom_model = {"type": "closed-curve-sbf", "degree": degree, "theta": theta, "weights": weights}
             _, dn = self._eval_closed_curve_frame(t)
             self.data_site_nrmls = dn
-            ns = max(round(supersample_fac * 1.5 * ntarget), ntarget) if method == 1 else ntarget
-            ts = np.linspace(0.0, 1.0, ns, endpoint=False)
-            ptss = self._eval_closed_curve(ts)
-            tan, nr = self._eval_closed_curve_frame(ts)
-            keep = weighted_sample_elimination_mis(ptss, rad) if method == 1 else np.ones(ptss.shape[0], dtype=bool)
-            if not np.any(keep):
-                keep[0] = True
-            self.sample_sites_s = ptss
-            self.sample_sites = ptss[keep]
-            self.nrmls = nr[keep]
+            if method == 1:
+                ns = max(round(supersample_fac * 1.5 * ntarget), ntarget)
+                ts = np.linspace(0.0, 1.0, ns, endpoint=False)
+                ptss = self._eval_closed_curve(ts)
+                tan, nr = self._eval_closed_curve_frame(ts)
+                self.sample_sites_s = ptss
+                curve_length = np.linalg.norm(np.vstack([ptss[1:], ptss[:1]]) - ptss, axis=1).sum()
+                target_spacing = max(np.sqrt(2.0) * rad, np.finfo(float).eps)
+                target_count = max(2, round(curve_length / target_spacing))
+                keep_inds = resample_closed_curve_by_arc_length(ptss, target_count).astype(int)
+                self.sample_sites = ptss[keep_inds]
+                self.nrmls = nr[keep_inds]
+            else:
+                ns = ntarget
+                ts = np.linspace(0.0, 1.0, ns, endpoint=False)
+                self.sample_sites = self._eval_closed_curve(ts)
+                _, self.nrmls = self._eval_closed_curve_frame(ts)
             self.uniform_sample_sites = self.sample_sites
             self.uniform_nrmls = self.nrmls
         elif dim == 3:

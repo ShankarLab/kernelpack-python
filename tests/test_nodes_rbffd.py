@@ -28,6 +28,19 @@ def test_poisson_sampler_and_geometry_clip():
     assert np.all(phi <= -0.08 + 1e-10)
 
 
+def test_closed_curve_boundary_sampling_is_arc_length_uniform():
+    t = np.linspace(0, 2 * np.pi, 60, endpoint=False)
+    curve = np.column_stack([np.cos(t), 0.7 * np.sin(t)])
+    surface = geometry.EmbeddedSurface()
+    surface.set_data_sites(curve)
+    surface.build_closed_geometric_model_ps(2, 0.05, curve.shape[0])
+    xb = surface.get_sample_sites()
+    assert xb.shape[0] > 10
+    seg_lens = np.linalg.norm(np.vstack([xb[1:], xb[:1]]) - xb, axis=1)
+    assert np.all(seg_lens > 0)
+    assert seg_lens.max() / seg_lens.min() < 1.5
+
+
 def test_rbffd_laplacian():
     xg, yg = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-1, 1, 5), indexing="ij")
     x = np.column_stack([xg.ravel(), yg.ravel()])
