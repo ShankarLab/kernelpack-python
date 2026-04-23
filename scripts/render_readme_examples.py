@@ -20,7 +20,7 @@ OUTDIR = ROOT / "docs" / "readme_assets"
 OUTDIR.mkdir(parents=True, exist_ok=True)
 
 
-def build_domain() -> tuple[EmbeddedSurface, object]:
+def build_domain(*, do_outer_refinement: bool = True) -> tuple[EmbeddedSurface, object]:
     t = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
     curve = np.column_stack([np.cos(t), 0.7 * np.sin(t)])
 
@@ -35,7 +35,7 @@ def build_domain() -> tuple[EmbeddedSurface, object]:
         0.08,
         seed=17,
         strip_count=5,
-        do_outer_refinement=True,
+        do_outer_refinement=do_outer_refinement,
         outer_fraction_of_h=0.5,
         outer_refinement_zone_size_as_multiple_of_h=2.0,
     )
@@ -45,8 +45,8 @@ def build_domain() -> tuple[EmbeddedSurface, object]:
 def save_geometry(surface, domain) -> Path:
     fig = plt.figure(figsize=(8, 8), constrained_layout=True)
     axes = fig.subplot_mosaic([["sites", "boundary"], ["domain", "domain"]])
-    xb = surface.get_sample_sites()
-    nr = surface.get_nrmls()
+    xb = domain.get_bdry_nodes()
+    nr = domain.get_nrmls()
     xi = domain.get_interior_nodes()
     xg = domain.get_ghost_nodes()
 
@@ -205,11 +205,12 @@ def save_diffusion(domain) -> Path:
 
 
 def main() -> None:
-    surface, domain = build_domain()
+    surface, geometry_domain = build_domain(do_outer_refinement=False)
+    _, solver_domain = build_domain(do_outer_refinement=True)
     paths = [
-        save_geometry(surface, domain),
-        save_poisson(domain),
-        save_diffusion(domain),
+        save_geometry(surface, geometry_domain),
+        save_poisson(solver_domain),
+        save_diffusion(solver_domain),
     ]
     for path in paths:
         print(path)
