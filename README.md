@@ -1,7 +1,382 @@
 # kernelpack-python
 
-`kernelpack-python` is a Python-first port of `kernelpack-matlab`.
+`kernelpack-python` is a Python-first port of
+[`kernelpack-matlab`](https://github.com/ShankarLab/kernelpack-matlab).
 
-This initial pass ports the polynomial, domain, node-generation, level-set,
-and local RBF-FD layers, together with the 2D and core 3D geometry utilities
-those workflows depend on.
+It brings the main geometry, node-generation, polynomial, RBF-FD, and solver
+ingredients of KernelPack into a Python codebase that is efficient,
+inspectable, and ready for scripting, experimentation, and extension.
+
+This is a real port, not a placeholder wrapper around the Matlab project. The
+goal is to keep the same overall KernelPack-style workflow while leaning into
+Python strengths such as NumPy/SciPy vectorization, sparse linear algebra, and
+testable modular code.
+
+## What it includes
+
+- Geometry objects for smooth and piecewise-smooth boundaries and surfaces:
+  `EmbeddedSurface`, `PiecewiseSmoothEmbeddedSurface`, and `RBFLevelSet`
+- Seeded fixed-radius Poisson node generation in axis-aligned boxes, with
+  geometry-aware clipping and boundary refinement through
+  `DomainNodeGenerator`
+- A compact `DomainDescriptor` for interior, boundary, ghost nodes, normals,
+  and nearest-neighbor search structures
+- Shared polynomial utilities in `kernelpack.poly`, including Legendre-based
+  `PolynomialBasis`
+- RBF-FD and weighted least-squares stencil and assembly classes in
+  `kernelpack.rbffd`
+- Fixed-domain `PoissonSolver` and `DiffusionSolver`
+
+The main packages live in:
+
+- [`src/kernelpack/geometry`](/E:/kernelpack-python/src/kernelpack/geometry)
+- [`src/kernelpack/nodes`](/E:/kernelpack-python/src/kernelpack/nodes)
+- [`src/kernelpack/domain`](/E:/kernelpack-python/src/kernelpack/domain)
+- [`src/kernelpack/poly`](/E:/kernelpack-python/src/kernelpack/poly)
+- [`src/kernelpack/rbffd`](/E:/kernelpack-python/src/kernelpack/rbffd)
+- [`src/kernelpack/solvers`](/E:/kernelpack-python/src/kernelpack/solvers)
+
+## Supported workflows
+
+- Smooth closed curves and smooth closed 3D surfaces
+- Open curve segments and open 3D surface patches
+- Piecewise-smooth planar boundaries and piecewise 3D surfaces
+- Fixed-radius Poisson disk sampling in any dimension
+- Level-set clipping of box clouds to geometry-defined domains
+- Standard and overlapped RBF-FD assembly
+- Fixed-domain Poisson solves
+- Fixed-domain diffusion stepping with BDF1, BDF2, and BDF3
+
+## Status
+
+The current Python port includes the main numerical layers that sit underneath
+typical KernelPack-style workflows:
+
+- geometry fitting and level-set construction
+- domain node generation
+- polynomial bases and multi-index utilities
+- local RBF-FD and weighted least-squares stencils
+- sparse operator assembly
+- fixed-domain Poisson and diffusion solvers
+
+The public API follows Python naming conventions, so Matlab-style methods such
+as `buildClosedGeometricModelPS` appear here as snake_case methods like
+`build_closed_geometric_model_ps`.
+
+## Installation
+
+From the repository root:
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -e .[dev]
+```
+
+Run the test suite with:
+
+```bash
+python -m pytest -q
+```
+
+## Examples and checks
+
+Current Python checks live in:
+
+- [`tests/test_poly.py`](/E:/kernelpack-python/tests/test_poly.py:1)
+- [`tests/test_nodes_rbffd.py`](/E:/kernelpack-python/tests/test_nodes_rbffd.py:1)
+- [`tests/test_solvers.py`](/E:/kernelpack-python/tests/test_solvers.py:1)
+
+The examples below are written as direct Python snippets so you can paste them
+into a script, notebook, or REPL.
+
+## Quick examples
+
+### Smooth 2D geometry
+
+```python
+import numpy as np
+
+from kernelpack.geometry import EmbeddedSurface
+
+# Define a smooth closed planar boundary.
+t = np.linspace(0.0, 2.0 * np.pi, 50, endpoint=False)
+curve = np.column_stack([np.cos(t), 0.7 * np.sin(t)])
+
+# Build the geometric model and level set.
+surface = EmbeddedSurface()
+surface.set_data_sites(curve)
+surface.build_closed_geometric_model_ps(2, 0.05, curve.shape[0])
+surface.build_level_set_from_geometric_model()
+
+# Extract boundary samples and normals from the fitted representation.
+xb = surface.get_sample_sites()
+nrmls = surface.get_nrmls()
+```
+
+### Geometry-clipped interior nodes
+
+```python
+from kernelpack.nodes import DomainNodeGenerator
+
+# Generate an interior-plus-boundary domain from a geometry and target spacing.
+generator = DomainNodeGenerator()
+domain = generator.build_domain_descriptor_from_geometry(
+    surface,
+    0.08,
+    seed=17,
+    strip_count=5,
+    do_outer_refinement=True,
+    outer_fraction_of_h=0.5,
+    outer_refinement_zone_size_as_multiple_of_h=2.0,
+)
+
+# Pull out the packed node sets.
+xi = domain.get_interior_nodes()
+xb = domain.get_bdry_nodes()
+xg = domain.get_ghost_nodes()
+```
+
+### RBF-FD operator assembly
+
+```python
+from kernelpack.rbffd import FDDiffOp, OpProperties, RBFStencil, StencilProperties
+
+# Ask the code to choose stencil parameters from a target accuracy.
+sp = StencilProperties.from_accuracy(
+    operator="lap",
+    convergence_order=4,
+    dimension=2,
+    approximation="rbf",
+    tree_mode="all",
+    point_set="interior_boundary",
+)
+
+# Record stencil metadata during assembly.
+op = OpProperties(record_stencils=True)
+
+# Assemble a Laplacian on the domain descriptor.
+assembler = FDDiffOp(lambda: RBFStencil())
+assembler.assemble_op(domain, "lap", sp, op)
+L = assembler.get_op()
+```
+
+### End-to-end Poisson solve with pure Neumann data
+
+```python
+import numpy as np
+
+from kernelpack.geometry import EmbeddedSurface
+from kernelpack.nodes import DomainNodeGenerator
+from kernelpack.solvers import PoissonSolver
+
+# Build a smooth closed domain.
+t = np.linspace(0.0, 2.0 * np.pi, 120, endpoint=False)
+curve = np.column_stack([np.cos(t), np.sin(t)])
+
+surface = EmbeddedSurface()
+surface.set_data_sites(curve)
+surface.build_closed_geometric_model_ps(2, 0.06, curve.shape[0])
+surface.build_level_set_from_geometric_model()
+
+# Generate interior, boundary, and ghost nodes.
+generator = DomainNodeGenerator()
+domain = generator.build_domain_descriptor_from_geometry(
+    surface,
+    0.08,
+    seed=17,
+    strip_count=5,
+)
+
+# Set up an RBF-FD Poisson solve on that domain.
+solver = PoissonSolver(
+    lap_assembler="fd",
+    bc_assembler="fd",
+    lap_stencil="rbf",
+    bc_stencil="rbf",
+)
+
+# Use a named target order instead of a magic number.
+target_order = 4
+solver.init(domain, target_order)
+
+# Manufactured pure-Neumann problem on the unit disk.
+u_exact = lambda X: (X[:, 0] ** 2 + X[:, 1] ** 2) ** 2 - (X[:, 0] ** 2 + X[:, 1] ** 2) + 1.0 / 6.0
+forcing = lambda X: 4.0 - 16.0 * (X[:, 0] ** 2 + X[:, 1] ** 2)
+neu_coeff = lambda Xb: np.ones(Xb.shape[0])
+dir_coeff = lambda Xb: np.zeros(Xb.shape[0])
+bc = lambda neu_coeffs, dir_coeffs, nr, Xb: np.sum(
+    np.column_stack(
+        [
+            4.0 * Xb[:, 0] * (Xb[:, 0] ** 2 + Xb[:, 1] ** 2) - 2.0 * Xb[:, 0],
+            4.0 * Xb[:, 1] * (Xb[:, 0] ** 2 + Xb[:, 1] ** 2) - 2.0 * Xb[:, 1],
+        ]
+    )
+    * nr,
+    axis=1,
+)
+
+# Solve and align the mean for comparison.
+result = solver.solve(forcing, neu_coeff, dir_coeff, bc)
+x_phys = domain.get_int_bdry_nodes()
+u = result["u"]
+u_true = u_exact(x_phys)
+u = u - np.mean(u - u_true)
+```
+
+### Diffusion stepping
+
+```python
+import numpy as np
+
+from kernelpack.solvers import DiffusionSolver
+
+# Set up a fixed-domain diffusion stepper on the same domain.
+solver = DiffusionSolver(
+    lap_assembler="fd",
+    bc_assembler="fd",
+    lap_stencil="rbf",
+    bc_stencil="rbf",
+)
+
+# Choose the diffusivity and time step.
+nu = 0.25
+dt = 0.02
+
+# Use a named target order instead of a magic number.
+target_order = 4
+solver.init(domain, target_order, dt, nu)
+
+# Define a manufactured transient problem with Dirichlet data.
+u_exact = lambda time, X: np.exp(-time) * (X[:, 0] ** 2 + X[:, 1] ** 2)
+forcing = lambda nu_value, time, X: (
+    -np.exp(-time) * (X[:, 0] ** 2 + X[:, 1] ** 2)
+    - 4.0 * nu_value * np.exp(-time)
+)
+neu_coeff = lambda Xb: np.zeros(Xb.shape[0])
+dir_coeff = lambda Xb: np.ones(Xb.shape[0])
+bc = lambda neu_coeffs, dir_coeffs, nr, time, Xb: u_exact(time, Xb)
+
+# Seed the state history and take BDF steps.
+solver.set_initial_state(u_exact(0.0, domain.get_int_bdry_nodes()))
+u1 = solver.bdf1_step(dt, forcing, neu_coeff, dir_coeff, bc)
+u2 = solver.bdf2_step(2.0 * dt, forcing, neu_coeff, dir_coeff, bc)
+u3 = solver.bdf3_step(3.0 * dt, forcing, neu_coeff, dir_coeff, bc)
+```
+
+## Package tour
+
+### `kernelpack.geometry`
+
+This package contains the geometry-facing pieces of the port:
+
+- `EmbeddedSurface` for smooth closed and open fitted boundaries/surfaces
+- `PiecewiseSmoothEmbeddedSurface` for segmented piecewise boundaries
+- `RBFLevelSet` for implicit geometry representation and Newton projection
+- shared helpers such as `distance_matrix`, `fibonacci_sphere`,
+  `project_to_best_fit_plane`, and `phs_kernel`
+
+These classes are intended to support the same overall workflow as the Matlab
+version:
+
+1. fit a geometric model to input sites
+2. sample boundary points and normals
+3. build an implicit level set
+4. use that level set for node clipping and solver workflows
+
+### `kernelpack.nodes`
+
+This package handles point generation and geometry clipping:
+
+- `generate_poisson_nodes_in_box`
+- `clip_points_by_geometry`
+- `bounding_box_extents`
+- `DomainNodeGenerator`
+
+The node-generation path supports:
+
+- deterministic seeded box sampling
+- geometry-aware clipping
+- outer refinement bands near boundaries
+- assembly of interior, boundary, and ghost nodes into a `DomainDescriptor`
+
+### `kernelpack.domain`
+
+`DomainDescriptor` is the compact container that links node generation and
+operator assembly. It stores:
+
+- interior nodes
+- boundary nodes
+- ghost nodes
+- boundary normals
+- all-node and subset node clouds
+- KD-tree-backed nearest-neighbor structures
+- domain metadata such as separation radius and level sets
+
+### `kernelpack.poly`
+
+This package provides shared polynomial support:
+
+- Jacobi/Legendre/Chebyshev recurrence helpers
+- tensor-product polynomial evaluation
+- total-degree and hyperbolic-cross multi-index builders
+- `PolynomialBasis`, including normalization around a local center and scale
+
+This is the polynomial backbone used by both the RBF-FD and weighted
+least-squares stencil paths.
+
+### `kernelpack.rbffd`
+
+This package contains the local discretization and assembly layer:
+
+- `RBFStencil`
+- `WeightedLeastSquaresStencil`
+- `StencilProperties`
+- `OpProperties`
+- `FDDiffOp`
+- `FDODiffOp`
+
+Current operator support includes:
+
+- interpolation
+- directional gradients
+- Laplacians
+- mixed Neumann/Dirichlet boundary-condition rows
+
+### `kernelpack.solvers`
+
+This package contains the current fixed-domain solver layer:
+
+- `PoissonSolver`
+- `DiffusionSolver`
+
+The solver layer is intentionally small and direct. It is built on top of the
+same `DomainDescriptor` and `rbffd` operator assembly path rather than
+introducing a separate abstraction stack.
+
+## Design notes
+
+The port aims to preserve the Matlab project’s logic while still feeling
+native in Python:
+
+- snake_case API names instead of Matlab camel case
+- dense local algebra through NumPy
+- sparse global solves through SciPy
+- nearest-neighbor structures through `scipy.spatial.cKDTree`
+- focused tests that mirror the Matlab checks
+
+The project direction is still to keep building outward from KernelPack-style
+contracts rather than inventing a separate abstraction hierarchy.
+
+## Notes
+
+- This is a Python implementation of the main KernelPack ingredients, not yet
+  a full one-to-one port of every C++ or Matlab path.
+- Pure Neumann Poisson problems are solved with the usual nullspace
+  augmentation, so comparisons should be made after aligning the constant.
+- The repo includes both `RBFStencil` and `WeightedLeastSquaresStencil`; the
+  weighted least-squares path reproduces low-order polynomial targets very
+  cleanly, while the RBF-FD path tracks the KernelPack-style stencil
+  formulation more directly.
+- The Python port is under active development, and the README will continue to
+  grow alongside new examples, solver workflows, and higher-level utilities.
