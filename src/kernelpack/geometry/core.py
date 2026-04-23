@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.interpolate import RBFInterpolator
-from scipy.spatial import ConvexHull, Delaunay, cKDTree
+from scipy.spatial import Delaunay, cKDTree
 
 
 def distance_matrix(x: np.ndarray, y: np.ndarray) -> np.ndarray:

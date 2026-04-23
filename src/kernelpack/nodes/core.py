@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from kernelpack.domain import DomainDescriptor
-from kernelpack.geometry import RBFLevelSet, distance_matrix
+from kernelpack.geometry import RBFLevelSet
 
 
 def generate_poisson_nodes_in_box(
