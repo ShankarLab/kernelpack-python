@@ -94,6 +94,8 @@ into a script, notebook, or REPL.
 
 ### Smooth 2D geometry
 
+![Smooth 2D geometry and domain](docs/readme_assets/geometry_domain.png)
+
 ```python
 import matplotlib.pyplot as plt
 import numpy as np
@@ -135,8 +137,6 @@ ax.grid(alpha=0.2)
 ax.legend(frameon=False)
 plt.show()
 ```
-
-![Smooth 2D geometry and domain](docs/readme_assets/geometry_domain.png)
 
 ### Geometry-clipped interior nodes
 
@@ -198,6 +198,8 @@ L = assembler.get_op()
 ```
 
 ### End-to-end Poisson solve with pure Neumann data
+
+![Poisson solution and error](docs/readme_assets/poisson_solution.png)
 
 ```python
 import matplotlib.pyplot as plt
@@ -281,9 +283,9 @@ for ax in axes:
 plt.show()
 ```
 
-![Poisson solution and error](docs/readme_assets/poisson_solution.png)
-
 ### Diffusion stepping
+
+![Diffusion solution, error, and time history](docs/readme_assets/diffusion_solution.png)
 
 ```python
 import matplotlib.pyplot as plt
@@ -371,8 +373,6 @@ for key in ("solution", "error"):
 
 plt.show()
 ```
-
-![Diffusion solution, error, and time history](docs/readme_assets/diffusion_solution.png)
 
 ## Package tour
 
