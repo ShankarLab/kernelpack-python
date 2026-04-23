@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 import numpy as np
 
@@ -9,7 +10,7 @@ from kernelpack.geometry import RBFLevelSet
 
 
 def generate_poisson_nodes_in_box(
-    radius: float,
+    radius_or_func: float | Callable[[np.ndarray, float], float],
     x_min: np.ndarray,
     x_max: np.ndarray,
     *,
@@ -18,168 +19,344 @@ def generate_poisson_nodes_in_box(
     deterministic: bool | None = None,
     strip_count: int | None = None,
     use_parallel: bool = True,
+    min_radius: float | None = None,
+    boundary_points: np.ndarray | None = None,
+    boundary_refinement_fraction: float = 1.0,
+    boundary_distance: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, object]]:
     x_min = np.asarray(x_min, dtype=float).reshape(-1)
     x_max = np.asarray(x_max, dtype=float).reshape(-1)
     dim = x_min.size
+    opts = _parse_poisson_options(
+        radius_or_func,
+        x_min,
+        x_max,
+        attempts=attempts,
+        seed=seed,
+        deterministic=deterministic,
+        strip_count=strip_count,
+        use_parallel=use_parallel,
+        min_radius=min_radius,
+        boundary_points=boundary_points,
+        boundary_refinement_fraction=boundary_refinement_fraction,
+        boundary_distance=boundary_distance,
+    )
     if np.any(x_max <= x_min):
-        info = {
-            "dimension": dim,
-            "radius": radius,
-            "attempts": attempts,
-            "seed": seed,
-            "deterministic": bool(seed is not None if deterministic is None else deterministic),
-            "strip_count": 1 if strip_count is None else strip_count,
-            "used_parallel": False,
-            "num_candidates": 0,
-            "num_points": 0,
-        }
+        info = _empty_poisson_info(opts, dim)
         return np.zeros((0, dim)), info
-    if seed is None:
-        seed = int(np.random.SeedSequence().generate_state(1)[0])
-    if deterministic is None:
-        deterministic = True
-    if strip_count is None:
-        strip_count = 5 if deterministic else 1
 
-    boxes = _build_strip_boxes(x_min, x_max, radius, int(strip_count))
+    boxes = _build_strip_boxes(x_min, x_max, float(opts["split_tol"]), int(opts["strip_count"]))
     clouds = []
     for k, box in enumerate(boxes):
         clouds.append(
-            _bridson_poisson_box(
-                radius,
+            _poisson_strip_sample(
                 box["sample_min"],
                 box["sample_max"],
-                attempts,
-                (seed + 104729 * k) % (2**32 - 1),
+                opts,
+                int((int(opts["base_seed"]) + 104729 * k) % (2**32 - 1)),
             )
         )
-    merged = _merge_local_clouds(clouds, x_min, x_max, radius)
+    points = _flatten_strip_clouds(clouds, x_min, x_max)
     info = {
         "dimension": dim,
-        "radius": radius,
-        "attempts": attempts,
-        "seed": seed,
-        "deterministic": bool(deterministic),
-        "strip_count": int(strip_count),
-        "used_parallel": False,
-        "num_candidates": int(merged["num_candidates"]),
-        "num_points": int(merged["points"].shape[0]),
+        "mode": opts["mode"],
+        "radius": opts["radius"],
+        "min_radius": float(opts["min_radius"]),
+        "attempts": int(opts["attempts"]),
+        "seed": int(opts["seed"]),
+        "deterministic": bool(opts["deterministic"]),
+        "strip_count": int(opts["strip_count"]),
+        "used_parallel": bool(opts["use_parallel"]),
+        "boundary_refinement_fraction": float(opts["boundary_refinement_fraction"]),
+        "boundary_distance": float(opts["boundary_distance"]),
+        "num_points": int(points.shape[0]),
     }
-    return merged["points"], info
+    return points, info
 
 
-def _build_strip_boxes(x_min: np.ndarray, x_max: np.ndarray, radius: float, strip_count: int) -> list[dict[str, np.ndarray]]:
+def _parse_poisson_options(
+    radius_or_func: float | Callable[[np.ndarray, float], float],
+    x_min: np.ndarray,
+    x_max: np.ndarray,
+    *,
+    attempts: int,
+    seed: int | None,
+    deterministic: bool | None,
+    strip_count: int | None,
+    use_parallel: bool,
+    min_radius: float | None,
+    boundary_points: np.ndarray | None,
+    boundary_refinement_fraction: float,
+    boundary_distance: float,
+) -> dict[str, object]:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    if x_min.size != x_max.size:
+        raise ValueError("x_min and x_max must have the same length")
+    if boundary_refinement_fraction <= 0 or boundary_refinement_fraction > 1:
+        raise ValueError("boundary_refinement_fraction must be in (0, 1]")
+    if boundary_distance < 0:
+        raise ValueError("boundary_distance must be nonnegative")
+
+    if boundary_points is None:
+        boundary_points = np.zeros((0, x_min.size))
+    else:
+        boundary_points = np.asarray(boundary_points, dtype=float)
+        if boundary_points.ndim != 2 or boundary_points.shape[1] != x_min.size:
+            raise ValueError("boundary_points must have the same column count as the box dimension")
+
+    had_explicit_seed = seed is not None
+    if seed is None:
+        seed = int(np.random.randint(1, 2**31))
+    if deterministic is None:
+        deterministic = had_explicit_seed
+    else:
+        deterministic = bool(deterministic)
+
+    requested_strip_count = None if strip_count is None else max(1, int(np.floor(strip_count)))
+    actual_strip_count = _default_strip_count(bool(use_parallel), deterministic, requested_strip_count)
+    used_parallel = bool(use_parallel) and actual_strip_count > 1
+    has_boundary_refinement = (
+        boundary_points.shape[0] > 0
+        and boundary_refinement_fraction < 1.0
+        and boundary_distance > 0.0
+    )
+
+    if callable(radius_or_func):
+        if min_radius is None:
+            raise ValueError("variable-density sampling requires min_radius")
+        min_radius = float(min_radius)
+        if min_radius <= 0:
+            raise ValueError("min_radius must be positive")
+        radius = float("nan")
+        if has_boundary_refinement:
+            mode = "variable_radius_with_boundary_refinement"
+            grid_radius = boundary_refinement_fraction * min_radius
+        else:
+            mode = "variable_radius"
+            grid_radius = min_radius
+        rad_func = radius_or_func
+    else:
+        radius = float(radius_or_func)
+        if radius <= 0:
+            raise ValueError("radius must be positive")
+        min_radius = radius if min_radius is None else float(min_radius)
+        if has_boundary_refinement:
+            mode = "fixed_radius_with_boundary_refinement"
+            grid_radius = boundary_refinement_fraction * radius
+        else:
+            mode = "fixed_radius"
+            grid_radius = radius
+        rad_func = None
+
+    return {
+        "radius": radius,
+        "rad_func": rad_func,
+        "min_radius": float(min_radius),
+        "attempts": int(attempts),
+        "seed": int(seed),
+        "base_seed": int(seed) % (2**32),
+        "deterministic": deterministic,
+        "strip_count": actual_strip_count,
+        "use_parallel": used_parallel,
+        "mode": mode,
+        "boundary_points": boundary_points,
+        "boundary_refinement_fraction": float(boundary_refinement_fraction),
+        "boundary_distance": float(boundary_distance),
+        "has_boundary_refinement": has_boundary_refinement,
+        "grid_radius": float(grid_radius),
+        "split_tol": float(min_radius),
+    }
+
+
+def _empty_poisson_info(opts: dict[str, object], dim: int) -> dict[str, object]:
+    return {
+        "dimension": dim,
+        "mode": opts["mode"],
+        "radius": opts["radius"],
+        "min_radius": float(opts["min_radius"]),
+        "attempts": int(opts["attempts"]),
+        "seed": int(opts["seed"]),
+        "deterministic": bool(opts["deterministic"]),
+        "strip_count": int(opts["strip_count"]),
+        "used_parallel": False,
+        "boundary_refinement_fraction": float(opts["boundary_refinement_fraction"]),
+        "boundary_distance": float(opts["boundary_distance"]),
+        "num_points": 0,
+    }
+
+
+def _default_strip_count(use_parallel: bool, deterministic: bool, requested_strip_count: int | None) -> int:
+    if deterministic:
+        return 1
+    if requested_strip_count is not None:
+        return requested_strip_count
+    if not use_parallel:
+        return 1
+    return 1
+
+
+def _build_strip_boxes(x_min: np.ndarray, x_max: np.ndarray, split_tol: float, strip_count: int) -> list[dict[str, np.ndarray]]:
     dim0 = (x_max[0] - x_min[0]) / strip_count
-    overlap = radius
     out = []
     for k in range(strip_count):
-        core_min = x_min.copy()
-        core_max = x_max.copy()
-        core_min[0] = x_min[0] + k * dim0
-        core_max[0] = x_min[0] + (k + 1) * dim0
-        sample_min = core_min.copy()
-        sample_max = core_max.copy()
-        if k > 0:
-            sample_min[0] = max(x_min[0], sample_min[0] - overlap)
-        if k < strip_count - 1:
-            sample_max[0] = min(x_max[0], sample_max[0] + overlap)
+        sample_min = x_min.copy()
+        sample_max = x_max.copy()
+        sample_min[0] = x_min[0] + k * dim0
+        sample_max[0] = min(x_max[0], sample_min[0] + dim0 - 0.33 * split_tol)
         out.append({"sample_min": sample_min, "sample_max": sample_max})
     return out
 
 
-def _bridson_poisson_box(radius: float, x_min: np.ndarray, x_max: np.ndarray, attempts: int, seed: int) -> np.ndarray:
-    dim = x_min.size
-    rng = np.random.default_rng(seed)
-    cell_size = radius / np.sqrt(dim)
-    grid_size = np.maximum(1, np.ceil((x_max - x_min) / cell_size).astype(int))
+def _poisson_strip_sample(
+    sample_min: np.ndarray,
+    sample_max: np.ndarray,
+    opts: dict[str, object],
+    seed: int,
+) -> np.ndarray:
+    if np.any(sample_max <= sample_min):
+        return np.zeros((0, sample_min.size))
+
+    dim = sample_min.size
+    cell_size = float(opts["grid_radius"]) / np.sqrt(dim)
+    grid_size = np.maximum(1, np.ceil((sample_max - sample_min) / cell_size).astype(int))
     grid: dict[tuple[int, ...], int] = {}
     points: list[np.ndarray] = []
     active: list[int] = []
+    rng = np.random.Generator(np.random.MT19937(int(seed)))
 
-    x0 = x_min + rng.random(dim) * (x_max - x_min)
+    x0 = sample_min + rng.random(dim) * (sample_max - sample_min)
     points.append(x0)
     active.append(0)
-    grid[_point_to_cell(x0, x_min, cell_size)] = 0
+    grid[_point_to_cell(x0, sample_min, cell_size)] = 0
 
     while active:
         pick = int(rng.integers(len(active)))
         active_idx = active[pick]
         base = points[active_idx]
+        active_radius = _local_radius(base, opts)
         accepted = False
-        for _ in range(attempts):
-            direction = rng.normal(size=dim)
-            norm = np.linalg.norm(direction)
-            direction = direction / (norm if norm > 0 else 1.0)
-            shell_radius = radius * (1.0 + rng.random() * (2**dim - 1)) ** (1.0 / dim)
-            candidate = base + shell_radius * direction
-            if np.any(candidate < x_min) or np.any(candidate > x_max):
+        for _ in range(int(opts["attempts"])):
+            candidate = _propose_candidate(base, active_radius, rng)
+            if np.any(candidate < sample_min) or np.any(candidate > sample_max):
                 continue
-            if _has_neighbor(candidate, radius, points, grid, x_min, cell_size, grid_size):
+            if _has_conflicting_neighbor(candidate, active_idx, points, grid, sample_min, cell_size, grid_size, opts):
                 continue
             idx = len(points)
             points.append(candidate)
             active.append(idx)
-            grid[_point_to_cell(candidate, x_min, cell_size)] = idx
+            grid[_point_to_cell(candidate, sample_min, cell_size)] = idx
             accepted = True
             break
         if not accepted:
             active[pick] = active[-1]
             active.pop()
+
     return np.asarray(points, dtype=float)
 
 
-def _point_to_cell(point: np.ndarray, x_min: np.ndarray, cell_size: float) -> tuple[int, ...]:
-    return tuple(np.maximum(1, np.floor((point - x_min) / cell_size).astype(int) + 1))
+def _propose_candidate(base: np.ndarray, radius: float, rng: np.random.Generator) -> np.ndarray:
+    dim = base.size
+    direction = rng.normal(size=dim)
+    direction = direction / max(np.linalg.norm(direction), np.finfo(float).eps)
+    shell_radius = radius * (1.0 + rng.random() * (2**dim - 1)) ** (1.0 / dim)
+    return base + shell_radius * direction
 
 
-def _has_neighbor(
+def _local_radius(point: np.ndarray, opts: dict[str, object]) -> float:
+    mode = str(opts["mode"])
+    if mode == "fixed_radius":
+        return float(opts["radius"])
+    if mode == "fixed_radius_with_boundary_refinement":
+        return _boundary_refined_radius(point, opts)
+    if mode == "variable_radius":
+        radius = float(opts["rad_func"](point, float(opts["min_radius"])))
+        return radius if radius > 1e-10 else float(opts["min_radius"])
+    if mode == "variable_radius_with_boundary_refinement":
+        base_radius = float(opts["rad_func"](point, float(opts["min_radius"])))
+        if base_radius <= 1e-10:
+            base_radius = float(opts["min_radius"])
+        if _boundary_rad_frac(point, opts) < 1.0:
+            return float(opts["boundary_refinement_fraction"]) * float(opts["min_radius"])
+        return base_radius
+    raise ValueError("unknown Poisson sampling mode")
+
+
+def _boundary_rad_frac(point: np.ndarray, opts: dict[str, object]) -> float:
+    if not bool(opts["has_boundary_refinement"]):
+        return 1.0
+    dist = _nearest_boundary_distance(point, np.asarray(opts["boundary_points"], dtype=float))
+    if dist <= float(opts["boundary_distance"]):
+        return float(opts["boundary_refinement_fraction"])
+    return 1.0
+
+
+def _boundary_refined_radius(point: np.ndarray, opts: dict[str, object]) -> float:
+    return _boundary_rad_frac(point, opts) * float(opts["radius"])
+
+
+def _has_conflicting_neighbor(
     point: np.ndarray,
-    radius: float,
+    active_idx: int,
     points: list[np.ndarray],
     grid: dict[tuple[int, ...], int],
     x_min: np.ndarray,
     cell_size: float,
     grid_size: np.ndarray,
+    opts: dict[str, object],
 ) -> bool:
+    candidate_radius = _local_radius(point, opts)
+    mode = str(opts["mode"])
+    if mode == "fixed_radius_with_boundary_refinement":
+        radius_for_reach = max(candidate_radius, float(opts["radius"]))
+        exclude_active = False
+        pairwise = True
+    elif mode in {"fixed_radius", "variable_radius", "variable_radius_with_boundary_refinement"}:
+        radius_for_reach = candidate_radius
+        exclude_active = True
+        pairwise = False
+    else:
+        raise ValueError("unknown Poisson sampling mode")
+
     idx = np.asarray(_point_to_cell(point, x_min, cell_size))
-    reach = max(1, int(np.ceil(radius / cell_size)))
+    reach = max(1, int(np.ceil(radius_for_reach / cell_size)))
     ranges = [range(max(1, idx[d] - reach), min(grid_size[d], idx[d] + reach) + 1) for d in range(idx.size)]
     for cell in np.array(np.meshgrid(*ranges)).T.reshape(-1, idx.size):
         key = tuple(int(v) for v in cell)
         if key not in grid:
             continue
         j = grid[key]
-        if np.linalg.norm(point - points[j]) < radius:
+        if exclude_active and j == active_idx:
+            continue
+        if pairwise:
+            threshold = max(candidate_radius, _local_radius(points[j], opts))
+        else:
+            threshold = candidate_radius
+        if np.linalg.norm(point - points[j]) < threshold:
             return True
     return False
 
 
-def _merge_local_clouds(local_clouds: list[np.ndarray], x_min: np.ndarray, x_max: np.ndarray, radius: float) -> dict[str, object]:
+def _nearest_boundary_distance(point: np.ndarray, boundary_points: np.ndarray) -> float:
+    if boundary_points.size == 0:
+        return float("inf")
+    diffs = boundary_points - point
+    return float(np.sqrt(np.nanmin(np.sum(diffs * diffs, axis=1))))
+
+
+def _flatten_strip_clouds(local_clouds: list[np.ndarray], x_min: np.ndarray, x_max: np.ndarray) -> np.ndarray:
     if not local_clouds:
-        return {"points": np.zeros((0, x_min.size)), "num_candidates": 0}
-    all_points = np.vstack([pts for pts in local_clouds if pts.size]) if any(pts.size for pts in local_clouds) else np.zeros((0, x_min.size))
-    if all_points.size == 0:
-        return {"points": all_points, "num_candidates": 0}
-    in_box = np.all((all_points >= x_min) & (all_points <= x_max), axis=1)
-    all_points = np.array(sorted(map(tuple, all_points[in_box])), dtype=float)
-    return {"points": _accept_by_global_grid(all_points, x_min, x_max, radius), "num_candidates": all_points.shape[0]}
+        return np.zeros((0, x_min.size))
+    any_points = [pts for pts in local_clouds if pts.size]
+    if not any_points:
+        return np.zeros((0, x_min.size))
+    points = np.vstack(any_points)
+    in_box = np.all((points >= x_min) & (points <= x_max), axis=1)
+    return points[in_box]
 
 
-def _accept_by_global_grid(points: np.ndarray, x_min: np.ndarray, x_max: np.ndarray, radius: float) -> np.ndarray:
-    dim = points.shape[1]
-    if points.shape[0] == 0:
-        return points
-    cell_size = radius / np.sqrt(dim)
-    grid_size = np.maximum(1, np.ceil((x_max - x_min) / cell_size).astype(int))
-    grid: dict[tuple[int, ...], int] = {}
-    accepted: list[np.ndarray] = []
-    for pt in points:
-        if _has_neighbor(pt, radius, accepted, grid, x_min, cell_size, grid_size):
-            continue
-        grid[_point_to_cell(pt, x_min, cell_size)] = len(accepted)
-        accepted.append(pt)
-    return np.asarray(accepted, dtype=float)
+def _point_to_cell(point: np.ndarray, x_min: np.ndarray, cell_size: float) -> tuple[int, ...]:
+    return tuple(np.maximum(1, np.floor((point - x_min) / cell_size).astype(int) + 1))
 
 
 def clip_points_by_geometry(
@@ -285,57 +462,43 @@ class DomainNodeGenerator:
         geometry: object,
         radius: float,
         *,
+        radius_function: Callable[[np.ndarray, float], float] | None = None,
         do_outer_refinement: bool = False,
-        outer_fraction_of_h: float = 0.5,
+        outer_fraction_of_h: float = 1.0,
         outer_refinement_zone_size_as_multiple_of_h: float = 2.0,
         **kwargs: object,
     ) -> None:
+        xb, nrmls, level_set = _build_boundary_state(geometry)
         x_min, x_max = bounding_box_extents(geometry, True)
-        self.generate_poisson_nodes(radius, x_min, x_max, **kwargs)
-        if not do_outer_refinement:
-            self.clip_to_geometry(geometry, keep="inside", boundary_clearance=radius)
-            self.last_info["min_active_radius"] = radius
-            return
-        fine_radius = outer_fraction_of_h * radius
-        zone_size = outer_refinement_zone_size_as_multiple_of_h * radius
-        min_radius_used = min(radius, fine_radius)
-        level_set = geometry.get_level_set()
-        if not isinstance(level_set, RBFLevelSet) or level_set.n == 0:
-            if hasattr(geometry, "build_level_set_from_geometric_model"):
-                geometry.build_level_set_from_geometric_model(None)
-            else:
-                geometry.build_level_set()
-            level_set = geometry.get_level_set()
-        coarse_phi = level_set.evaluate(self.xi_pds_raw)
-        coarse_mask = (coarse_phi <= -zone_size) & (coarse_phi <= -min_radius_used)
-        coarse_nodes = self.xi_pds_raw[coarse_mask]
-        fine_raw, fine_info = generate_poisson_nodes_in_box(fine_radius, x_min, x_max, **kwargs)
-        fine_nodes, fine_mask, fine_phi = clip_points_by_geometry(
-            fine_raw,
-            geometry,
-            keep="inside",
-            boundary_clearance=min_radius_used,
-            min_signed_distance=-zone_size,
-            max_signed_distance=-min_radius_used,
-        )
-        self.xi_pds_raw = np.vstack([self.xi_pds_raw, fine_raw])
-        self.xi = np.vstack([coarse_nodes, fine_nodes])
-        self.xi_orig = self.xi
-        self.s_dim = self.xi.shape[1]
+        sampler_input = radius if radius_function is None else radius_function
+        sampler_kwargs = dict(kwargs)
+        sampler_kwargs["min_radius"] = radius
+        if do_outer_refinement:
+            sampler_kwargs["boundary_points"] = xb
+            sampler_kwargs["boundary_refinement_fraction"] = outer_fraction_of_h
+            sampler_kwargs["boundary_distance"] = outer_refinement_zone_size_as_multiple_of_h * radius
+
+        x_raw, info = generate_poisson_nodes_in_box(sampler_input, x_min, x_max, **sampler_kwargs)
+        self.xi = x_raw
+        self.xb = np.zeros((0, x_raw.shape[1]))
+        self.xg = np.zeros((0, x_raw.shape[1]))
+        self.nrmls = np.zeros((0, x_raw.shape[1]))
+        self.xi_orig = x_raw
+        self.xi_pds_raw = x_raw
+        self.s_dim = x_raw.shape[1]
+        self.last_info = info
+
+        clearance = outer_fraction_of_h * radius
+        self.clip_to_geometry(geometry, keep="inside", boundary_clearance=clearance)
+        self.last_info["min_active_radius"] = clearance
         self.last_info["outer_refinement"] = {
-            "enabled": True,
-            "coarse_radius": radius,
-            "fine_radius": fine_radius,
-            "zone_size": zone_size,
-            "min_active_radius": min_radius_used,
-            "coarse_points_kept": coarse_nodes.shape[0],
-            "fine_raw_points": fine_raw.shape[0],
-            "fine_points_kept": fine_nodes.shape[0],
-            "fine_info": fine_info,
-            "fine_mask": fine_mask,
-            "fine_phi": fine_phi[fine_mask],
+            "enabled": bool(do_outer_refinement),
+            "refinement_fraction": outer_fraction_of_h,
+            "zone_size": outer_refinement_zone_size_as_multiple_of_h * radius,
+            "boundary_distance": outer_refinement_zone_size_as_multiple_of_h * radius,
         }
-        self.last_info["min_active_radius"] = min_radius_used
+        self.last_info["boundary_node_count"] = xb.shape[0]
+        self.last_info["boundary_level_set_built"] = level_set is not None
 
     def clip_to_geometry(self, geometry: object, **kwargs: object) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         x, mask, phi = clip_points_by_geometry(self.xi_pds_raw, geometry, **kwargs)
@@ -350,12 +513,11 @@ class DomainNodeGenerator:
     def build_domain_descriptor_from_geometry(self, geometry: object, radius: float, **kwargs: object) -> DomainDescriptor:
         self.generate_interior_nodes_from_geometry(geometry, radius, **kwargs)
         xb, nrmls, level_set = _build_boundary_state(geometry)
-        min_radius_used = self.last_info.get("min_active_radius", radius)
-        xg = xb + 0.5 * min_radius_used * nrmls
+        xg = xb + 0.5 * radius * nrmls
         descriptor = DomainDescriptor()
         descriptor.set_nodes(self.xi, xb, xg)
         descriptor.set_normals(nrmls)
-        descriptor.set_sep_rad(float(min_radius_used))
+        descriptor.set_sep_rad(float(radius))
         descriptor.set_outer_level_set(level_set)
         descriptor.set_boundary_level_sets([level_set])
         descriptor.build_structs()
@@ -365,7 +527,7 @@ class DomainNodeGenerator:
         self.descriptor = descriptor
         self.last_info["boundary_node_count"] = xb.shape[0]
         self.last_info["ghost_node_count"] = xg.shape[0]
-        self.last_info["min_active_radius"] = min_radius_used
+        self.last_info["sep_radius"] = radius
         return descriptor
 
     def get_interior_nodes(self) -> np.ndarray:
