@@ -257,11 +257,30 @@ neu_coeff = lambda Xb: np.zeros(Xb.shape[0])
 dir_coeff = lambda Xb: np.ones(Xb.shape[0])
 bc = lambda neu_coeffs, dir_coeffs, nr, time, Xb: u_exact(time, Xb)
 
-# Seed the state history and take BDF steps.
-solver.set_initial_state(u_exact(0.0, domain.get_int_bdry_nodes()))
-u1 = solver.bdf1_step(dt, forcing, neu_coeff, dir_coeff, bc)
-u2 = solver.bdf2_step(2.0 * dt, forcing, neu_coeff, dir_coeff, bc)
-u3 = solver.bdf3_step(3.0 * dt, forcing, neu_coeff, dir_coeff, bc)
+# March the solution to a final time.
+t_final = 0.50
+nsteps = int(round(t_final / dt))
+x_phys = domain.get_int_bdry_nodes()
+
+solver.set_initial_state(u_exact(0.0, x_phys))
+times = [0.0]
+states = [solver.current_physical_state().copy()]
+
+for step in range(1, nsteps + 1):
+    time = step * dt
+    if step == 1:
+        u_next = solver.bdf1_step(time, forcing, neu_coeff, dir_coeff, bc)
+    elif step == 2:
+        u_next = solver.bdf2_step(time, forcing, neu_coeff, dir_coeff, bc)
+    else:
+        u_next = solver.bdf3_step(time, forcing, neu_coeff, dir_coeff, bc)
+    times.append(time)
+    states.append(u_next.copy())
+
+# Compare against the manufactured solution at the final time.
+u_final = states[-1]
+u_true_final = u_exact(t_final, x_phys)
+max_error = np.max(np.abs(u_final - u_true_final))
 ```
 
 ## Package tour
