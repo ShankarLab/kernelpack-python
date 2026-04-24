@@ -1,6 +1,6 @@
 import numpy as np
 
-from kernelpack import domain, geometry, nodes, rbffd
+from kernelpack import domain, geometry, nodes, poly, rbffd
 
 
 def test_poisson_sampler_and_geometry_clip():
@@ -58,3 +58,12 @@ def test_rbffd_laplacian():
     lwls = fd_wls.get_op()
     lap = lwls @ f
     assert np.all(np.abs(lap[active_rows - 1] - 4) < 1e-8)
+
+
+def test_legendre_basis_numba_path_matches_reference():
+    x = np.array([[0.1, -0.2], [0.4, 0.3], [-0.25, 0.5]])
+    basis = poly.PolynomialBasis.from_total_degree(2, 3, family="legendre")
+    d = np.array([[0, 0], [1, 0], [0, 1], [2, 0]])
+    fast = basis.evaluate(x, d, True)
+    ref = poly.JacobiPolynomials.tensor_evaluate(x, basis.index_set, basis.get_recurrence, d)
+    assert np.allclose(fast, ref, atol=1e-12, rtol=1e-12)

@@ -130,3 +130,86 @@ def phs_lap_matrix(r: np.ndarray, degree: int, dim: int) -> np.ndarray:
         l = degree * (dim + degree - 2) * r ** (degree - 2)
     l[~np.isfinite(l)] = 0.0
     return l
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(cache=True, fastmath=True)
+    def _legendre_recurrence_numba(n: int) -> tuple[np.ndarray, np.ndarray]:
+        a = np.zeros(n, dtype=np.float64)
+        b = np.ones(n, dtype=np.float64)
+        if n > 0:
+            b[0] = 2.0
+        if n > 1:
+            b[1] = 1.0 / 3.0
+        for q in range(2, n):
+            qq = float(q)
+            b[q] = (qq * qq) / ((2.0 * qq + 1.0) * (2.0 * qq - 1.0))
+        return a, b
+
+
+    @njit(cache=True, fastmath=True)
+    def _legendre_eval_numba(x: np.ndarray, n: int, d: int) -> np.ndarray:
+        a, b = _legendre_recurrence_numba(n + 1)
+        out = np.zeros((x.size, n + 1), dtype=np.float64)
+        out[:, 0] = 1.0 / np.sqrt(b[0])
+        if n > 0:
+            out[:, 1] = ((x - a[0]) * out[:, 0]) / np.sqrt(b[1])
+        for q in range(1, n):
+            out[:, q + 1] = ((x - a[q]) * out[:, q] - np.sqrt(b[q]) * out[:, q - 1]) / np.sqrt(b[q + 1])
+
+        if d == 0:
+            return out
+
+        cur = out
+        for qd in range(1, d + 1):
+            nxt = np.zeros_like(cur)
+            for q in range(qd, n + 1):
+                if q == qd:
+                    denom = 1.0
+                    for j in range(q + 1):
+                        denom *= b[j]
+                    const = 1.0
+                    for j in range(2, qd + 1):
+                        const *= float(j)
+                    nxt[:, q] = const / np.sqrt(denom)
+                else:
+                    nxt[:, q] = ((x - a[q - 1]) * nxt[:, q - 1] - np.sqrt(b[q - 1]) * nxt[:, q - 2] + qd * cur[:, q - 1]) / np.sqrt(b[q])
+            cur = nxt
+        return cur
+
+
+    @njit(cache=True, fastmath=True)
+    def _legendre_tensor_evaluate_numba(x: np.ndarray, alpha: np.ndarray, d: np.ndarray) -> np.ndarray:
+        max_alpha = 0
+        for i in range(alpha.shape[0]):
+            for j in range(alpha.shape[1]):
+                if alpha[i, j] > max_alpha:
+                    max_alpha = alpha[i, j]
+        a0 = np.sqrt(2.0)
+        out = np.ones((x.shape[0], alpha.shape[0], d.shape[0]), dtype=np.float64) / (a0 ** x.shape[1])
+        for qd in range(d.shape[0]):
+            for qdim in range(x.shape[1]):
+                local_max = 0
+                for i in range(alpha.shape[0]):
+                    if alpha[i, qdim] > local_max:
+                        local_max = alpha[i, qdim]
+                temp = _legendre_eval_numba(x[:, qdim], local_max, int(d[qd, qdim]))
+                for i in range(alpha.shape[0]):
+                    degree = alpha[i, qdim]
+                    if d[qd, qdim] == 0 and degree == 0:
+                        continue
+                    out[:, i, qd] *= temp[:, degree] * a0
+        return out
+
+else:
+    _legendre_tensor_evaluate_numba = None
+
+
+def legendre_tensor_evaluate(x: np.ndarray, alpha: np.ndarray, d: np.ndarray) -> np.ndarray | None:
+    if not NUMBA_AVAILABLE:
+        return None
+    x = np.asarray(x, dtype=float)
+    alpha = np.asarray(alpha, dtype=np.int64)
+    d = np.asarray(d, dtype=np.int64)
+    return _legendre_tensor_evaluate_numba(x, alpha, d)

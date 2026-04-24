@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from math import comb
 from typing import Callable
 
 import numpy as np
 from scipy.special import gammaln
+
+from kernelpack._numba import legendre_tensor_evaluate
 
 
 class JacobiPolynomials:
@@ -130,7 +133,7 @@ class JacobiPolynomials:
 
 
 def jacobi_recurrence(n: int, alpha: float, beta: float) -> tuple[np.ndarray, np.ndarray]:
-    return JacobiPolynomials.recurrence(n, alpha, beta)
+    return _cached_jacobi_recurrence(int(n), float(alpha), float(beta))
 
 
 def legendre_recurrence(n: int) -> tuple[np.ndarray, np.ndarray]:
@@ -139,6 +142,12 @@ def legendre_recurrence(n: int) -> tuple[np.ndarray, np.ndarray]:
 
 def chebyshev_recurrence(n: int) -> tuple[np.ndarray, np.ndarray]:
     return jacobi_recurrence(n, -0.5, -0.5)
+
+
+@lru_cache(maxsize=64)
+def _cached_jacobi_recurrence(n: int, alpha: float, beta: float) -> tuple[np.ndarray, np.ndarray]:
+    a, b = JacobiPolynomials.recurrence(n, alpha, beta)
+    return a.copy(), b.copy()
 
 
 def poly_eval(a: np.ndarray, b: np.ndarray, x: np.ndarray, n: int, d: int = 0) -> np.ndarray:
@@ -273,7 +282,12 @@ class PolynomialBasis:
             d = np.zeros((1, self.dimension), dtype=int)
         d = np.atleast_2d(np.asarray(d, dtype=int))
         xwork = np.asarray(x, dtype=float) if assume_normalized else self.normalize_points(x)
-        p = JacobiPolynomials.tensor_evaluate(xwork, self.index_set, self.get_recurrence, d)
+        if self.family == "legendre":
+            p = legendre_tensor_evaluate(xwork, self.index_set, d)
+            if p is None:
+                p = JacobiPolynomials.tensor_evaluate(xwork, self.index_set, self.get_recurrence, d)
+        else:
+            p = JacobiPolynomials.tensor_evaluate(xwork, self.index_set, self.get_recurrence, d)
         orders = d.sum(axis=1)
         for q, order in enumerate(orders):
             if order > 0:
