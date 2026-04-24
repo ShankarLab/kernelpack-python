@@ -8,7 +8,7 @@ from typing import Callable
 import numpy as np
 from scipy import sparse
 
-from kernelpack._numba import phs_dr_over_r_matrix, phs_kernel_matrix, phs_lap_matrix
+from kernelpack._numba import build_augmented_rbf_lhs, normalize_stencil_points, phs_dr_over_r_matrix, phs_kernel_matrix, phs_lap_matrix
 from kernelpack.domain import DomainDescriptor
 from kernelpack.geometry import distance_matrix
 from kernelpack.poly import PolynomialBasis, total_degree_indices
@@ -190,14 +190,10 @@ class RBFStencil:
         self.npoly = sp.npoly
         self.r_stencil = distance_matrix(x, x)
         self.width = max(float(self.r_stencil.max(initial=0.0)), 1.0)
-        self.xm = x.mean(axis=0)
-        self.xc = (x - self.xm) / self.width
+        self.xm, self.xc, self.width = normalize_stencil_points(x, self.width)
         self.basis = _basis_template(self.s_dim, self.ell, "legendre")
         p = self.basis.evaluate(self.xc, _zero_derivative(self.s_dim), True)
-        self.a = np.zeros((self.n + self.npoly, self.n + self.npoly))
-        self.a[: self.n, : self.n] = self.phs_rbf(self.r_stencil, sp.spline_degree)
-        self.a[: self.n, self.n :] = p
-        self.a[self.n :, : self.n] = p.T
+        self.a = build_augmented_rbf_lhs(self.phs_rbf(self.r_stencil, sp.spline_degree), p)
         self.solve_lhs = self.a
 
     def compute_weights(self, x: np.ndarray, *args: object) -> np.ndarray:
@@ -227,16 +223,22 @@ class RBFStencil:
     def lap_op(self, sp: StencilProperties, _op: OpProperties, r_rhs: np.ndarray, _x_subset: np.ndarray, _x: np.ndarray, x_at_origin_subset: np.ndarray, _x_at_origin: np.ndarray) -> np.ndarray:
         bpoly = np.zeros((self.npoly, x_at_origin_subset.shape[0]))
         for d in range(self.s_dim):
-            dd = np.zeros((1, self.s_dim), dtype=int)
-            dd[0, d] = 2
             bpoly += self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, d) + _cached_unit_multi_index(self.s_dim, d), True).T / (self.width**2)
-        return np.vstack([self.phs_lap(r_rhs, sp.spline_degree, self.s_dim).T, bpoly])
+        top = self.phs_lap(r_rhs, sp.spline_degree, self.s_dim).T
+        out = np.empty((top.shape[0] + bpoly.shape[0], top.shape[1]), dtype=float)
+        out[: top.shape[0], :] = top
+        out[top.shape[0] :, :] = bpoly
+        return out
 
     def grad_op(self, sp: StencilProperties, op: OpProperties, r_rhs: np.ndarray, x_subset: np.ndarray, x: np.ndarray, x_at_origin_subset: np.ndarray, _x_at_origin: np.ndarray) -> np.ndarray:
         dim = op.selectdim
         diff = x_subset[:, dim : dim + 1] - x[None, :, dim]
         bpoly = self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, dim), True).T / self.width
-        return np.vstack([(diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T, bpoly])
+        top = (diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T
+        out = np.empty((top.shape[0] + bpoly.shape[0], top.shape[1]), dtype=float)
+        out[: top.shape[0], :] = top
+        out[top.shape[0] :, :] = bpoly
+        return out
 
     def bc_op(self, sp: StencilProperties, op: OpProperties, neu_coeff: float, dir_coeff: float, r_rhs: np.ndarray, x_subset: np.ndarray, x: np.ndarray, x_at_origin_subset: np.ndarray, x_at_origin: np.ndarray, nr_subset: np.ndarray) -> np.ndarray:
         # Mixed boundary rows are assembled as a linear combination of normal
@@ -248,7 +250,10 @@ class RBFStencil:
                 diff = x_subset[:, d : d + 1] - x[None, :, d]
                 grad_rbf = (diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T
                 grad_poly = self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, d), True).T / self.width
-                total += neu_coeff * np.vstack([grad_rbf, grad_poly]) * nr_subset[:, d]
+                stacked = np.empty((grad_rbf.shape[0] + grad_poly.shape[0], grad_rbf.shape[1]), dtype=float)
+                stacked[: grad_rbf.shape[0], :] = grad_rbf
+                stacked[grad_rbf.shape[0] :, :] = grad_poly
+                total += neu_coeff * stacked * nr_subset[:, d]
         if dir_coeff != 0:
             total += dir_coeff * self.interp_op(sp, op, r_rhs, x_subset, x, x_at_origin_subset, x_at_origin)
         if dir_coeff == 0 and neu_coeff == 0:
@@ -257,7 +262,11 @@ class RBFStencil:
 
     def interp_op(self, sp: StencilProperties, _op: OpProperties, r_rhs: np.ndarray, _x_subset: np.ndarray, _x: np.ndarray, x_at_origin_subset: np.ndarray, _x_at_origin: np.ndarray) -> np.ndarray:
         bpoly = self.basis.evaluate(x_at_origin_subset, np.zeros((1, self.s_dim), dtype=int), True).T
-        return np.vstack([self.phs_rbf(r_rhs, sp.spline_degree).T, bpoly])
+        top = self.phs_rbf(r_rhs, sp.spline_degree).T
+        out = np.empty((top.shape[0] + bpoly.shape[0], top.shape[1]), dtype=float)
+        out[: top.shape[0], :] = top
+        out[top.shape[0] :, :] = bpoly
+        return out
 
     def _compute_weights_interior(self, x: np.ndarray, sp: StencilProperties, op: OpProperties, apply_op: str | Callable[..., np.ndarray], rhs_indices: int | np.ndarray) -> np.ndarray:
         # Build the operator right-hand side for the requested stencil rows and

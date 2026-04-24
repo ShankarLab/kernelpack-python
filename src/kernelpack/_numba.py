@@ -135,6 +135,57 @@ def phs_lap_matrix(r: np.ndarray, degree: int, dim: int) -> np.ndarray:
 if NUMBA_AVAILABLE:
 
     @njit(cache=True, fastmath=True)
+    def _normalize_stencil_points_numba(x: np.ndarray, width_floor: float) -> tuple[np.ndarray, np.ndarray, float]:
+        xm = np.zeros(x.shape[1], dtype=np.float64)
+        for i in range(x.shape[0]):
+            for d in range(x.shape[1]):
+                xm[d] += x[i, d]
+        for d in range(x.shape[1]):
+            xm[d] /= x.shape[0]
+
+        width = 0.0
+        for i in range(x.shape[0]):
+            accum = 0.0
+            for d in range(x.shape[1]):
+                diff = x[i, d] - xm[d]
+                accum += diff * diff
+            dist = np.sqrt(accum)
+            if dist > width:
+                width = dist
+        if width < width_floor:
+            width = width_floor
+
+        xc = np.empty_like(x)
+        inv_width = 1.0 / width
+        for i in range(x.shape[0]):
+            for d in range(x.shape[1]):
+                xc[i, d] = (x[i, d] - xm[d]) * inv_width
+        return xm, xc, width
+
+
+    @njit(cache=True, fastmath=True)
+    def _build_augmented_rbf_lhs_numba(kernel: np.ndarray, poly: np.ndarray) -> np.ndarray:
+        n = kernel.shape[0]
+        npoly = poly.shape[1]
+        out = np.zeros((n + npoly, n + npoly), dtype=np.float64)
+        for i in range(n):
+            for j in range(n):
+                out[i, j] = kernel[i, j]
+        for i in range(n):
+            for j in range(npoly):
+                value = poly[i, j]
+                out[i, n + j] = value
+                out[n + j, i] = value
+        return out
+
+else:
+    _normalize_stencil_points_numba = None
+    _build_augmented_rbf_lhs_numba = None
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(cache=True, fastmath=True)
     def _legendre_recurrence_numba(n: int) -> tuple[np.ndarray, np.ndarray]:
         a = np.zeros(n, dtype=np.float64)
         b = np.ones(n, dtype=np.float64)
@@ -213,3 +264,29 @@ def legendre_tensor_evaluate(x: np.ndarray, alpha: np.ndarray, d: np.ndarray) ->
     alpha = np.asarray(alpha, dtype=np.int64)
     d = np.asarray(d, dtype=np.int64)
     return _legendre_tensor_evaluate_numba(x, alpha, d)
+
+
+def normalize_stencil_points(x: np.ndarray, width_floor: float = 1.0) -> tuple[np.ndarray, np.ndarray, float]:
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return np.zeros(x.shape[1], dtype=float), np.zeros_like(x), float(width_floor)
+    if NUMBA_AVAILABLE:
+        return _normalize_stencil_points_numba(x, float(width_floor))
+    xm = x.mean(axis=0)
+    width = max(float(np.linalg.norm(x - xm, axis=1).max(initial=0.0)), float(width_floor))
+    xc = (x - xm) / width
+    return xm, xc, width
+
+
+def build_augmented_rbf_lhs(kernel: np.ndarray, poly: np.ndarray) -> np.ndarray:
+    kernel = np.asarray(kernel, dtype=float)
+    poly = np.asarray(poly, dtype=float)
+    if NUMBA_AVAILABLE:
+        return _build_augmented_rbf_lhs_numba(kernel, poly)
+    n = kernel.shape[0]
+    npoly = poly.shape[1]
+    out = np.zeros((n + npoly, n + npoly), dtype=float)
+    out[:n, :n] = kernel
+    out[:n, n:] = poly
+    out[n:, :n] = poly.T
+    return out
