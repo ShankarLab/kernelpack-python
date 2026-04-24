@@ -56,6 +56,7 @@ class PUSLAdvectionSolver:
             "inflow_value": None,
         }
     )
+    inflow_forward_fallback_reported: bool = False
     solve_stats: dict[str, int] = field(
         default_factory=lambda: {
             "moved_solves_zero_defect": 0,
@@ -131,6 +132,7 @@ class PUSLAdvectionSolver:
         self.patch_stencil_props = _build_patch_stencil_properties(self.output_nodes.shape[1], self.xi)
         self.patch_stencils = [build_patch_stencil(self.output_nodes[ids], self.patch_stencil_props) for ids in self.patch_node_ids]
         self.domain_measure = estimate_domain_measure(self.domain)
+        self.inflow_forward_fallback_reported = False
 
     def get_output_nodes(self) -> np.ndarray:
         return self.output_nodes
@@ -160,10 +162,15 @@ class PUSLAdvectionSolver:
         velocity: Callable[[float, np.ndarray], np.ndarray],
         rk: Callable[[float, np.ndarray, float, Callable[[float, np.ndarray], np.ndarray]], np.ndarray] | None = None,
     ) -> np.ndarray:
+        validate_boundary_condition_configuration(self)
+        bc = self.boundary_condition
+        t_arrival = tn + self.dt
+        if bc["mode"] == "tangential":
+            validate_tangential_boundary_flow(self, tn, velocity)
+            validate_tangential_boundary_flow(self, t_arrival, velocity)
+
         xdep = trace_points_backward(self.output_nodes, tn, self.dt, velocity, rk)
-        values = localized_evaluate(self, coeffs_old, xdep)
-        values = apply_boundary_condition(self, values, xdep, tn + self.dt, velocity)
-        return values
+        return sample_backward_traced_values(self, coeffs_old, self.output_nodes, xdep, t_arrival, velocity)
 
     def forward_sl_step(
         self,
@@ -172,12 +179,23 @@ class PUSLAdvectionSolver:
         velocity: Callable[[float, np.ndarray], np.ndarray],
         rk: Callable[[float, np.ndarray, float, Callable[[float, np.ndarray], np.ndarray]], np.ndarray] | None = None,
     ) -> np.ndarray:
+        validate_boundary_condition_configuration(self)
+        bc = self.boundary_condition
+        if bc["mode"] == "inflow_dirichlet":
+            if not self.inflow_forward_fallback_reported:
+                self.inflow_forward_fallback_reported = True
+            return self.backward_sl_step(tn, coeffs_old, velocity, rk)
+
         coeffs_old = np.asarray(coeffs_old, dtype=float)
         nodal_old = self.evaluate_at_nodes(coeffs_old)
         if nodal_old.ndim == 1:
             nodal_old = nodal_old[:, None]
 
-        preserve_mass = self.boundary_condition["mode"] != "inflow_dirichlet"
+        if bc["mode"] == "tangential":
+            validate_tangential_boundary_flow(self, tn, velocity)
+            validate_tangential_boundary_flow(self, tn + self.dt, velocity)
+
+        preserve_mass = bc["mode"] != "inflow_dirichlet"
         target_mass = None
         if preserve_mass:
             target_mass = np.array([self.total_mass(coeffs_old, col + 1) for col in range(nodal_old.shape[1])], dtype=float)
@@ -185,6 +203,7 @@ class PUSLAdvectionSolver:
         rhs_local = nodal_old.copy()
         nodal_current = nodal_old.copy()
         traced_points = trace_points_forward(self.output_nodes, tn, self.dt, velocity, rk)
+        rhs_local, traced_points = prepare_forward_boundary_data(self, rhs_local, traced_points, tn, self.dt, nodal_old.shape[1], velocity)
 
         max_defect_sweeps = 4
         corrections_used = 0
@@ -370,6 +389,174 @@ def apply_boundary_condition(
         return values
     if mode == "periodic":
         raise ValueError("Periodic PU-SL transport is not yet supported")
+    return values
+
+
+def validate_boundary_condition_configuration(obj: PUSLAdvectionSolver) -> None:
+    bc = obj.boundary_condition
+    if bc["mode"] == "periodic":
+        if not bc["periodic_patches"]:
+            raise ValueError("PUSL periodic advection boundary condition requires periodic patch rules")
+        raise ValueError(
+            "PUSL periodic advection is not yet supported robustly. "
+            "The localized PU basis itself still needs true periodic patch support, not just wrapped traces."
+        )
+    if bc["mode"] == "inflow_dirichlet" and not callable(bc["inflow_value"]):
+        raise ValueError("PUSL inflow-Dirichlet boundary condition requires an inflow callback")
+
+
+def point_is_inside_level_set(obj: PUSLAdvectionSolver, point: np.ndarray, tol: float | None = None) -> bool:
+    phi = obj.domain.get_outer_level_set()
+    if phi is None:
+        raise ValueError("PUSL advection boundary handling requires a domain level set")
+    if tol is None:
+        tol = max(1.0e-12, 2.0e-2 * obj.domain.get_sep_rad())
+    x = np.asarray(point, dtype=float).reshape(1, -1)
+    return float(phi.evaluate(x)[0]) <= tol
+
+
+def boundary_normal_velocity(point: np.ndarray, normal: np.ndarray, time: float, velocity: Callable[[float, np.ndarray], np.ndarray]) -> float:
+    x = np.asarray(point, dtype=float).reshape(1, -1)
+    u = np.asarray(velocity(time, x), dtype=float)
+    if u.shape != x.shape:
+        raise ValueError("velocity callback returned the wrong shape during boundary normal velocity evaluation")
+    return float(np.dot(u[0], np.asarray(normal, dtype=float).reshape(-1)))
+
+
+def validate_tangential_boundary_flow(obj: PUSLAdvectionSolver, time: float, velocity: Callable[[float, np.ndarray], np.ndarray]) -> None:
+    xb = obj.domain.get_bdry_nodes()
+    nr = obj.domain.get_nrmls()
+    if xb.size == 0:
+        return
+    u = np.asarray(velocity(time, xb), dtype=float)
+    if u.shape != xb.shape:
+        raise ValueError("PUSL tangential-flow check received a velocity field with the wrong shape")
+    normal_speed = np.abs(np.sum(u * nr, axis=1))
+    if np.max(normal_speed) > float(obj.boundary_condition["normal_velocity_tolerance"]):
+        raise ValueError("PUSL advection tangential-flow boundary condition is incompatible with the supplied velocity field")
+
+
+def inflow_samples(obj: PUSLAdvectionSolver, time: float, points: np.ndarray, n_cols: int) -> np.ndarray:
+    values = np.asarray(obj.boundary_condition["inflow_value"](time, np.asarray(points, dtype=float)), dtype=float)
+    if values.ndim == 1:
+        values = values[:, None]
+    if values.shape != (points.shape[0], n_cols):
+        raise ValueError("PUSL inflow callback returned a matrix with the wrong shape")
+    return values
+
+
+def boundary_hit_on_segment(obj: PUSLAdvectionSolver, inside_point: np.ndarray, outside_point: np.ndarray, max_iterations: int = 40) -> tuple[np.ndarray, float]:
+    phi = obj.domain.get_outer_level_set()
+    if phi is None:
+        raise ValueError("PUSL boundary tracing requires a domain level set")
+    inside = np.asarray(inside_point, dtype=float).reshape(-1)
+    outside = np.asarray(outside_point, dtype=float).reshape(-1)
+    lo = 0.0
+    hi = 1.0
+    xlo = inside
+    xhi = outside
+    flo = float(phi.evaluate(xlo.reshape(1, -1))[0])
+    fhi = float(phi.evaluate(xhi.reshape(1, -1))[0])
+    tol = max(1.0e-12, 2.0e-2 * obj.domain.get_sep_rad())
+    if flo > tol:
+        inside, outside = outside, inside
+        xlo, xhi = inside, outside
+        flo, fhi = fhi, flo
+    if flo > tol or fhi < -tol:
+        raise ValueError("PUSL boundary tracing failed to bracket a boundary hit on the level set")
+    for _ in range(max_iterations):
+        mid = 0.5 * (lo + hi)
+        xmid = (1.0 - mid) * inside + mid * outside
+        fmid = float(phi.evaluate(xmid.reshape(1, -1))[0])
+        if abs(fmid) <= tol or abs(hi - lo) <= 1.0e-12:
+            return xmid, mid
+        if fmid <= tol:
+            lo = mid
+            xlo = xmid
+            flo = fmid
+        else:
+            hi = mid
+            xhi = xmid
+            fhi = fmid
+    mid = 0.5 * (lo + hi)
+    return (1.0 - mid) * inside + mid * outside, mid
+
+
+def prepare_forward_boundary_data(
+    obj: PUSLAdvectionSolver,
+    rhs_local: np.ndarray,
+    traced_points: np.ndarray,
+    tn: float,
+    dt: float,
+    n_cols: int,
+    velocity: Callable[[float, np.ndarray], np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    bc = obj.boundary_condition
+    out_rhs = np.asarray(rhs_local, dtype=float).copy()
+    out_traced = np.asarray(traced_points, dtype=float).copy()
+    xb = obj.domain.get_bdry_nodes()
+    nr = obj.domain.get_nrmls()
+    n_interior = obj.domain.get_num_interior_nodes()
+
+    for local_row in range(out_traced.shape[0]):
+        global_row = local_row
+        is_boundary_row = global_row >= n_interior
+        x = obj.output_nodes[local_row]
+
+        if bc["mode"] == "inflow_dirichlet" and is_boundary_row:
+            boundary_idx = global_row - n_interior
+            bn = boundary_normal_velocity(xb[boundary_idx], nr[boundary_idx], tn + dt, velocity)
+            if bn < -float(bc["normal_velocity_tolerance"]):
+                out_traced[local_row] = x
+                out_rhs[local_row] = inflow_samples(obj, tn + dt, x.reshape(1, -1), n_cols)[0]
+                continue
+
+        if point_is_inside_level_set(obj, out_traced[local_row]):
+            continue
+
+        if bc["mode"] == "tangential":
+            raise ValueError("PUSL forward SL exited the domain under a tangential-flow boundary condition")
+        if bc["mode"] == "unspecified":
+            raise ValueError("PUSL forward SL traced outside the domain without an advection boundary condition")
+        if bc["mode"] == "inflow_dirichlet":
+            hit_point, _ = boundary_hit_on_segment(obj, x, out_traced[local_row])
+            out_traced[local_row] = hit_point
+    return out_rhs, out_traced
+
+
+def sample_backward_traced_values(
+    obj: PUSLAdvectionSolver,
+    coeffs_old: np.ndarray,
+    source_points: np.ndarray,
+    traced_points: np.ndarray,
+    t_arrival: float,
+    velocity: Callable[[float, np.ndarray], np.ndarray],
+) -> np.ndarray:
+    bc = obj.boundary_condition
+    coeffs_old = np.asarray(coeffs_old, dtype=float)
+    if coeffs_old.ndim == 1:
+        coeffs_old = coeffs_old[:, None]
+    traced_points = np.asarray(traced_points, dtype=float)
+    source_points = np.asarray(source_points, dtype=float)
+    values = np.zeros((traced_points.shape[0], coeffs_old.shape[1]), dtype=float)
+    inside_rows: list[int] = []
+
+    for i in range(traced_points.shape[0]):
+        if point_is_inside_level_set(obj, traced_points[i]):
+            inside_rows.append(i)
+            continue
+        if bc["mode"] == "tangential":
+            raise ValueError("PUSL backward SL traced outside the domain under a tangential-flow boundary condition")
+        if bc["mode"] == "unspecified":
+            raise ValueError("PUSL backward SL traced outside the domain without an advection boundary condition")
+        if bc["mode"] == "inflow_dirichlet":
+            hit_point, hit_param = boundary_hit_on_segment(obj, source_points[i], traced_points[i])
+            hit_time = t_arrival - hit_param * obj.dt
+            values[i] = inflow_samples(obj, hit_time, hit_point.reshape(1, -1), coeffs_old.shape[1])[0]
+
+    if inside_rows:
+        ids = np.asarray(inside_rows, dtype=int)
+        values[ids] = localized_evaluate(obj, coeffs_old, traced_points[ids])
     return values
 
 

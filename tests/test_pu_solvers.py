@@ -135,6 +135,34 @@ def test_pusl_forward_advection_uses_defect_correction():
     assert stats["defect_correction_solves"] >= 1
 
 
+def test_pusl_forward_inflow_falls_back_to_backward():
+    domain = build_test_domain()
+    solver = solvers.PUSLAdvectionSolver()
+    solver.init(domain, 4, 0.01)
+    solver.set_inflow_dirichlet_boundary(lambda t, x: np.ones((x.shape[0], 1)))
+    xout = solver.get_output_nodes()
+    c0 = (1.0 + xout[:, 0]).reshape(-1, 1)
+    velocity = lambda t, x: 2.0 * x
+    forward = solver.forward_sl_step(0.0, c0, velocity)
+    backward = solver.backward_sl_step(0.0, c0, velocity)
+    assert np.max(np.abs(forward - backward)) < 1.0e-12
+
+
+def test_pusl_tangential_boundary_validation_raises_for_normal_flow():
+    domain = build_test_domain()
+    solver = solvers.PUSLAdvectionSolver()
+    solver.init(domain, 4, 0.01)
+    solver.set_tangential_flow_boundary()
+    c0 = solver.project_constant(1.0, 1)
+    velocity = lambda t, x: x
+    try:
+        solver.backward_sl_step(0.0, c0, velocity)
+    except ValueError as exc:
+        assert "tangential-flow" in str(exc)
+    else:
+        raise AssertionError("expected tangential-flow validation to fail for normal velocity")
+
+
 def test_pusl_fd_advection_diffusion_smoke():
     domain = build_test_domain()
     solver = solvers.PUSLFDAdvectionDiffusionSolver()
