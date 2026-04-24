@@ -175,6 +175,11 @@ def ratio_eval(a: np.ndarray, b: np.ndarray, x: np.ndarray, n: int) -> np.ndarra
 
 
 def total_degree_indices(d: int, k: int) -> np.ndarray:
+    return _cached_total_degree_indices(int(d), int(k)).copy()
+
+
+@lru_cache(maxsize=64)
+def _cached_total_degree_indices(d: int, k: int) -> np.ndarray:
     # Enumerate the usual total-degree basis ordering by sweeping total degree
     # from low to high and expanding all compositions at each level.
     rows: list[tuple[int, ...]] = []
@@ -237,7 +242,7 @@ class PolynomialBasis:
 
     @classmethod
     def from_total_degree(cls, dim: int, degree: int, **kwargs: object) -> "PolynomialBasis":
-        return cls(total_degree_indices(dim, degree), **kwargs)
+        return cls(_cached_total_degree_indices(int(dim), int(degree)).copy(), **kwargs)
 
     @classmethod
     def from_hyperbolic_cross(cls, dim: int, degree: int, **kwargs: object) -> "PolynomialBasis":

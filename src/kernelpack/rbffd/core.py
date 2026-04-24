@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from math import ceil
 from typing import Callable
 
@@ -17,6 +18,21 @@ def _unit_multi_index(dim: int, selectdim: int) -> np.ndarray:
     d = np.zeros((1, dim), dtype=int)
     d[0, selectdim] = 1
     return d
+
+
+@lru_cache(maxsize=32)
+def _cached_unit_multi_index(dim: int, selectdim: int) -> np.ndarray:
+    return _unit_multi_index(dim, selectdim)
+
+
+@lru_cache(maxsize=32)
+def _zero_derivative(dim: int) -> np.ndarray:
+    return np.zeros((1, dim), dtype=int)
+
+
+@lru_cache(maxsize=128)
+def _basis_template(dim: int, ell: int, family: str) -> PolynomialBasis:
+    return PolynomialBasis.from_total_degree(dim, ell, family=family, center=np.zeros(dim), scale=1.0)
 
 
 @dataclass
@@ -176,8 +192,8 @@ class RBFStencil:
         self.width = max(float(self.r_stencil.max(initial=0.0)), 1.0)
         self.xm = x.mean(axis=0)
         self.xc = (x - self.xm) / self.width
-        self.basis = PolynomialBasis.from_total_degree(self.s_dim, self.ell, family="legendre", center=np.zeros(self.s_dim), scale=1.0)
-        p = self.basis.evaluate(self.xc, np.zeros((1, self.s_dim), dtype=int), True)
+        self.basis = _basis_template(self.s_dim, self.ell, "legendre")
+        p = self.basis.evaluate(self.xc, _zero_derivative(self.s_dim), True)
         self.a = np.zeros((self.n + self.npoly, self.n + self.npoly))
         self.a[: self.n, : self.n] = self.phs_rbf(self.r_stencil, sp.spline_degree)
         self.a[: self.n, self.n :] = p
@@ -213,13 +229,13 @@ class RBFStencil:
         for d in range(self.s_dim):
             dd = np.zeros((1, self.s_dim), dtype=int)
             dd[0, d] = 2
-            bpoly += self.basis.evaluate(x_at_origin_subset, dd, True).T / (self.width**2)
+            bpoly += self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, d) + _cached_unit_multi_index(self.s_dim, d), True).T / (self.width**2)
         return np.vstack([self.phs_lap(r_rhs, sp.spline_degree, self.s_dim).T, bpoly])
 
     def grad_op(self, sp: StencilProperties, op: OpProperties, r_rhs: np.ndarray, x_subset: np.ndarray, x: np.ndarray, x_at_origin_subset: np.ndarray, _x_at_origin: np.ndarray) -> np.ndarray:
         dim = op.selectdim
         diff = x_subset[:, dim : dim + 1] - x[None, :, dim]
-        bpoly = self.basis.evaluate(x_at_origin_subset, _unit_multi_index(self.s_dim, dim), True).T / self.width
+        bpoly = self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, dim), True).T / self.width
         return np.vstack([(diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T, bpoly])
 
     def bc_op(self, sp: StencilProperties, op: OpProperties, neu_coeff: float, dir_coeff: float, r_rhs: np.ndarray, x_subset: np.ndarray, x: np.ndarray, x_at_origin_subset: np.ndarray, x_at_origin: np.ndarray, nr_subset: np.ndarray) -> np.ndarray:
@@ -231,7 +247,7 @@ class RBFStencil:
             for d in range(self.s_dim):
                 diff = x_subset[:, d : d + 1] - x[None, :, d]
                 grad_rbf = (diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T
-                grad_poly = self.basis.evaluate(x_at_origin_subset, _unit_multi_index(self.s_dim, d), True).T / self.width
+                grad_poly = self.basis.evaluate(x_at_origin_subset, _cached_unit_multi_index(self.s_dim, d), True).T / self.width
                 total += neu_coeff * np.vstack([grad_rbf, grad_poly]) * nr_subset[:, d]
         if dir_coeff != 0:
             total += dir_coeff * self.interp_op(sp, op, r_rhs, x_subset, x, x_at_origin_subset, x_at_origin)
@@ -355,8 +371,8 @@ class WeightedLeastSquaresStencil:
         r2 = np.sum((x - self.xm) ** 2, axis=1)
         self.width = max(float(np.sqrt(r2.max(initial=0.0))), 1.0)
         self.xc = (x - self.xm) / self.width
-        self.basis = PolynomialBasis.from_total_degree(self.s_dim, self.fit_ell, family="legendre", center=np.zeros(self.s_dim), scale=1.0)
-        p = self.basis.evaluate(self.xc, np.zeros((1, self.s_dim), dtype=int), True)
+        self.basis = _basis_template(self.s_dim, self.fit_ell, "legendre")
+        p = self.basis.evaluate(self.xc, _zero_derivative(self.s_dim), True)
         self.node_weights = np.clip(np.exp(-4.0 * r2 / (self.width**2)), 1e-10, 1.0)
         sqrtw = np.sqrt(self.node_weights)
         weighted_p = p * sqrtw[:, None]
