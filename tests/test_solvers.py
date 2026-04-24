@@ -141,3 +141,60 @@ def test_diffusion_solver_checks():
     history_solver.set_state_history(u_exact(0, xphys), u_exact(dt, xphys), u_exact(2 * dt, xphys))
     state_now = history_solver.current_physical_state()
     assert np.max(np.abs(state_now - u_exact(2 * dt, xphys))) < 1e-12
+
+
+def test_multispecies_diffusion_solver_checks():
+    domain = build_test_domain()
+    nu = 0.2
+    dt = 0.02
+    xphys = domain.get_int_bdry_nodes()
+    u_exact = lambda time, x: np.column_stack(
+        [
+            np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2),
+            2.0 * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2),
+            -0.5 * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2),
+        ]
+    )
+    forcing = lambda nu_value, time, x: np.column_stack(
+        [
+            -np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2) - 4 * nu_value * np.exp(-time),
+            -2.0 * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2) - 8 * nu_value * np.exp(-time),
+            0.5 * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2) + 2 * nu_value * np.exp(-time),
+        ]
+    )
+    neu_coeff_fixed = lambda xb: np.zeros(xb.shape[0])
+    dir_coeff_fixed = lambda xb: np.ones(xb.shape[0])
+    bc = lambda neu_coeffs, dir_coeffs, nr, time, xb: u_exact(time, xb)
+
+    solver = solvers.MultiSpeciesDiffusionSolver(lap_assembler="fd", bc_assembler="fd", lap_stencil="wls", bc_stencil="wls")
+    solver.init(domain, 3, dt, nu)
+    solver.set_initial_state(u_exact(0.0, xphys))
+    u1 = solver.bdf1_step(dt, forcing, neu_coeff_fixed, dir_coeff_fixed, bc)
+    assert np.max(np.abs(u1 - u_exact(dt, xphys))) < 4e-1
+
+
+def test_heterogeneous_multispecies_diffusion_solver_checks():
+    domain = build_test_domain()
+    nus = np.array([0.15, 0.25])
+    dt = 0.02
+    xphys = domain.get_int_bdry_nodes()
+
+    def u_exact(species: int, time: float, x: np.ndarray) -> np.ndarray:
+        amp = 1.0 + 0.5 * species
+        return amp * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2)
+
+    def forcing(species: int, nu_value: float, time: float, x: np.ndarray) -> np.ndarray:
+        amp = 1.0 + 0.5 * species
+        return -amp * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2) - 4 * amp * nu_value * np.exp(-time)
+
+    neu_coeff = lambda species, time, xb: np.zeros(xb.shape[0])
+    dir_coeff = lambda species, time, xb: np.ones(xb.shape[0])
+    bc = lambda species, neu_coeffs, dir_coeffs, nr, time, xb: u_exact(species, time, xb)
+
+    solver = solvers.HeterogeneousMultiSpeciesDiffusionSolver(lap_assembler="fd", bc_assembler="fd", lap_stencil="wls", bc_stencil="wls")
+    solver.init(domain, 3, dt, nus)
+    u0 = np.column_stack([u_exact(species, 0.0, xphys) for species in range(nus.size)])
+    solver.set_initial_state(u0)
+    u1 = solver.bdf1_step(dt, forcing, neu_coeff, dir_coeff, bc)
+    target = np.column_stack([u_exact(species, dt, xphys) for species in range(nus.size)])
+    assert np.max(np.abs(u1 - target)) < 4.5e-1

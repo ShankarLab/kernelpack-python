@@ -83,6 +83,33 @@ def test_multispecies_pu_diffusion_solver_checks():
     assert np.max(np.abs(u1 - u_exact(dt, xphys))) < 5e-1
 
 
+def test_heterogeneous_multispecies_pu_diffusion_solver_checks():
+    domain = build_test_domain()
+    nus = np.array([0.15, 0.25])
+    dt = 0.02
+    xphys = domain.get_int_bdry_nodes()
+
+    def u_exact(species: int, time: float, x: np.ndarray) -> np.ndarray:
+        amp = 1.0 + 0.5 * species
+        return amp * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2)
+
+    def forcing(species: int, nu_value: float, time: float, x: np.ndarray) -> np.ndarray:
+        amp = 1.0 + 0.5 * species
+        return -amp * np.exp(-time) * (x[:, 0] ** 2 + x[:, 1] ** 2) - 4 * amp * nu_value * np.exp(-time)
+
+    neu_coeff = lambda species, time, xb: np.zeros(xb.shape[0])
+    dir_coeff = lambda species, time, xb: np.ones(xb.shape[0])
+    bc = lambda species, neu_coeffs, dir_coeffs, nr, time, xb: u_exact(species, time, xb)
+
+    solver = solvers.HeterogeneousMultiSpeciesPUDiffusionSolver()
+    solver.init(domain, 3, dt, nus)
+    u0 = np.column_stack([u_exact(species, 0.0, xphys) for species in range(nus.size)])
+    solver.set_initial_state(u0)
+    u1 = solver.bdf1_step(dt, forcing, neu_coeff, dir_coeff, bc)
+    target = np.column_stack([u_exact(species, dt, xphys) for species in range(nus.size)])
+    assert np.max(np.abs(u1 - target)) < 6e-1
+
+
 def test_pusl_advection_constant_preservation():
     domain = build_test_domain()
     solver = solvers.PUSLAdvectionSolver()
@@ -123,5 +150,54 @@ def test_pusl_pu_advection_diffusion_smoke():
     dir_coeff = lambda t, xb: np.zeros(xb.shape[0])
     bc = lambda neu_coeffs, dir_coeffs, nr, t, xb: np.zeros(xb.shape[0])
     u1 = solver.bdf1_step(0.01, velocity, None, forcing, neu_coeff, dir_coeff, bc)
+    assert u1.shape == u0.shape
+    assert np.all(np.isfinite(u1))
+
+
+def test_pusl_fd_advection_diffusion_reaction_changes_solution():
+    domain = build_test_domain()
+    dt = 0.01
+    nu = 0.05
+    velocity = lambda t, x: np.column_stack([-x[:, 1], x[:, 0]])
+    forcing = lambda nu_value, t, x: np.zeros(x.shape[0])
+    reaction = lambda t, state, x: 0.5 * np.ones(x.shape[0])
+    neu_coeff = lambda t, xb: np.ones(xb.shape[0])
+    dir_coeff = lambda t, xb: np.zeros(xb.shape[0])
+    bc = lambda neu_coeffs, dir_coeffs, nr, t, xb: np.zeros(xb.shape[0])
+
+    solver_no_rxn = solvers.PUSLFDAdvectionDiffusionSolver()
+    solver_no_rxn.init(domain, 4, 4, dt, nu, "backward")
+    xout = solver_no_rxn.get_output_nodes()
+    u0 = 1.0 + xout[:, 0]
+    solver_no_rxn.set_initial_state(u0)
+    u1_no = solver_no_rxn.bdf1_step(dt, velocity, None, forcing, neu_coeff, dir_coeff, bc)
+
+    solver_rxn = solvers.PUSLFDAdvectionDiffusionSolver()
+    solver_rxn.init(domain, 4, 4, dt, nu, "backward")
+    solver_rxn.set_initial_state(u0)
+    u1_yes = solver_rxn.bdf1_step(dt, velocity, None, forcing, neu_coeff, dir_coeff, bc, reaction=reaction)
+
+    assert u1_yes.shape == u1_no.shape
+    assert np.all(np.isfinite(u1_yes))
+    assert np.max(np.abs(u1_yes - u1_no)) > 1.0e-8
+
+
+def test_pusl_pu_advection_diffusion_reaction_wrapper_smoke():
+    domain = build_test_domain()
+    dt = 0.01
+    nu = 0.05
+    velocity = lambda t, x: np.column_stack([-x[:, 1], x[:, 0]])
+    forcing = lambda nu_value, t, x: np.zeros(x.shape[0])
+    reaction = lambda t, state, x: -0.1 * state
+    neu_coeff = lambda t, xb: np.ones(xb.shape[0])
+    dir_coeff = lambda t, xb: np.zeros(xb.shape[0])
+    bc = lambda neu_coeffs, dir_coeffs, nr, t, xb: np.zeros(xb.shape[0])
+
+    solver = solvers.PUSLPUAdvectionDiffusionReactionSolver()
+    solver.init(domain, 4, 4, dt, nu, "backward")
+    xout = solver.get_output_nodes()
+    u0 = 1.0 + xout[:, 0]
+    solver.set_initial_state(u0)
+    u1 = solver.bdf1_step(dt, velocity, None, forcing, reaction, neu_coeff, dir_coeff, bc)
     assert u1.shape == u0.shape
     assert np.all(np.isfinite(u1))
