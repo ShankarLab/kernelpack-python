@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from itertools import product
 
 import numpy as np
+from scipy import linalg
 from scipy.spatial import Delaunay, cKDTree
 
 from kernelpack._numba import dense_distance_matrix, phs_kernel_matrix
@@ -194,6 +195,27 @@ def build_planar_parametric_eval_nodes_2d(x: np.ndarray, n: int) -> np.ndarray:
     return pts[mask]
 
 
+def _solve_augmented_rbf_system(kernel: np.ndarray, poly: np.ndarray, rhs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    # Solve the usual augmented RBF interpolation system
+    #
+    #   [K  P][w] = [rhs]
+    #   [P' 0][c]   [ 0 ]
+    #
+    # by block elimination. The polynomial block is tiny in the level-set
+    # builder, so it is cheaper to factor only the dense kernel block and
+    # form the small Schur complement than to solve the full saddle-point
+    # system directly.
+    rhs = np.asarray(rhs, dtype=float)
+    lu, piv = linalg.lu_factor(kernel, overwrite_a=False, check_finite=False)
+    y = linalg.lu_solve((lu, piv), rhs, check_finite=False)
+    z = linalg.lu_solve((lu, piv), poly, check_finite=False)
+    schur = poly.T @ z
+    schur_rhs = poly.T @ y
+    poly_coeffs = linalg.solve(schur, schur_rhs, assume_a="sym", check_finite=False)
+    weights = y - z @ poly_coeffs
+    return weights, poly_coeffs
+
+
 @dataclass
 class RBFLevelSet:
     n: int = 0
@@ -232,12 +254,9 @@ class RBFLevelSet:
         r = distance_matrix(self.centers, self.centers)
         k = phs_kernel(r, self.m_spline_degree)
         reg = 1e-12 * max(1.0, np.abs(k).max(initial=0.0))
-        a = np.block([[k + reg * np.eye(nc), p], [p.T, np.zeros((self.dim + 1, self.dim + 1))]])
-        rhs = np.concatenate([self.values, np.zeros(self.dim + 1)])
-        coeffs = np.linalg.solve(a, rhs)
-        self.weights = coeffs[:nc]
-        self.poly_coeffs = coeffs[nc:]
-        self.mean_potential = float(self.evaluate(x).mean())
+        system_k = k + reg * np.eye(nc)
+        self.weights, self.poly_coeffs = _solve_augmented_rbf_system(system_k, p, self.values)
+        self.mean_potential = float((k[: self.n] @ self.weights + p[: self.n] @ self.poly_coeffs).mean())
 
     def evaluate(self, xe: np.ndarray) -> np.ndarray:
         model = self.get_evaluation_model()
