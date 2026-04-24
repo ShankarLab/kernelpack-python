@@ -103,6 +103,113 @@ def test_variable_poisson_solver_checks():
     assert np.max(np.abs(zero_neu_result["u"])) < 1e-8
 
 
+def test_variable_poisson_solver_matches_mixed_bc_case():
+    domain = build_test_domain()
+
+    def exact_solution(x):
+        return 1.0 + np.sin(x[:, 0]) * np.sin(x[:, 1]) + 0.25 * np.cos(0.5 * x[:, 0])
+
+    def coeff_field(x):
+        return 1.4 + 0.2 * np.sin(x[:, 0]) + 0.15 * np.cos(x[:, 1])
+
+    def forcing(x):
+        sx = np.sin(x[:, 0])
+        sy = np.sin(x[:, 1])
+        cx = np.cos(x[:, 0])
+        cy = np.cos(x[:, 1])
+        ux = cx * sy - 0.125 * np.sin(0.5 * x[:, 0])
+        uy = sx * cy
+        lap = -2.0 * sx * sy - 0.0625 * np.cos(0.5 * x[:, 0])
+        ax = 0.2 * np.cos(x[:, 0])
+        ay = -0.15 * np.sin(x[:, 1])
+        return -coeff_field(x) * lap - ax * ux - ay * uy
+
+    def normal_derivative(nr, x):
+        dx = np.cos(x[:, 0]) * np.sin(x[:, 1]) - 0.125 * np.sin(0.5 * x[:, 0])
+        dy = np.sin(x[:, 0]) * np.cos(x[:, 1])
+        return nr[:, 0] * dx + nr[:, 1] * dy
+
+    neu_coeff = lambda xb: 0.6 + 0.15 * xb[:, 0] ** 2 + 0.05 * xb[:, 1] ** 2
+    dir_coeff = lambda xb: 1.0 + 0.1 * xb[:, 0] ** 2 + 0.08 * xb[:, 1] ** 2
+
+    solver = solvers.VariablePoissonSolver(lap_assembler="fdo", bc_assembler="fd", lap_stencil="rbf", bc_stencil="rbf")
+    solver.init(domain, 4)
+    result = solver.solve(
+        forcing,
+        coeff_field,
+        neu_coeff,
+        dir_coeff,
+        lambda neu, dir_, nr, xb: neu * normal_derivative(nr, xb) + dir_ * exact_solution(xb),
+    )
+    assert np.max(np.abs(result["u"] - exact_solution(domain.get_int_bdry_nodes()))) < 2.5e-1
+    assert np.array_equal(solver.get_output_nodes(), domain.get_int_bdry_nodes())
+    assert solver.get_output_range() == (0, domain.get_num_int_bdry_nodes())
+    assert not solver.returns_distributed_state()
+
+
+def test_nonlinear_variable_poisson_solver_checks():
+    domain = build_test_domain()
+
+    def exact_solution(x):
+        return 1.0 + np.sin(x[:, 0]) * np.sin(x[:, 1]) + 0.25 * np.cos(0.5 * x[:, 0])
+
+    def exp_scaled(u, scale):
+        return np.exp(scale * u)
+
+    def forcing(x, _u):
+        sx = np.sin(x[:, 0])
+        sy = np.sin(x[:, 1])
+        cx = np.cos(x[:, 0])
+        cy = np.cos(x[:, 1])
+        ux = cx * sy - 0.125 * np.sin(0.5 * x[:, 0])
+        uy = sx * cy
+        lap = -2.0 * sx * sy - 0.0625 * np.cos(0.5 * x[:, 0])
+        grad_sq = ux**2 + uy**2
+        a = exp_scaled(exact_solution(x), 0.2)
+        return -a * lap - 0.2 * a * grad_sq
+
+    def forcing_u(x, u):
+        return np.zeros(x.shape[0])
+
+    def coeff(x, u):
+        return exp_scaled(u, 0.2)
+
+    def coeff_u(x, u):
+        return 0.2 * exp_scaled(u, 0.2)
+
+    def normal_derivative(nr, x):
+        dx = np.cos(x[:, 0]) * np.sin(x[:, 1]) - 0.125 * np.sin(0.5 * x[:, 0])
+        dy = np.sin(x[:, 0]) * np.cos(x[:, 1])
+        return nr[:, 0] * dx + nr[:, 1] * dy
+
+    neu_coeff = lambda xb: 0.6 + 0.15 * xb[:, 0] ** 2 + 0.05 * xb[:, 1] ** 2
+    dir_coeff = lambda xb: 1.0 + 0.1 * xb[:, 0] ** 2 + 0.08 * xb[:, 1] ** 2
+
+    solver = solvers.NonlinearVariablePoissonSolver(lap_assembler="fdo", bc_assembler="fd", lap_stencil="rbf", bc_stencil="rbf")
+    solver.init(domain, 4)
+    solver.set_nonlinear_tolerance(1.0e-10)
+    solver.set_linear_tolerance(1.0e-10)
+    solver.set_max_nonlinear_iterations(12)
+    result = solver.solve(
+        forcing,
+        forcing_u,
+        coeff,
+        coeff_u,
+        neu_coeff,
+        dir_coeff,
+        lambda neu, dir_, nr, xb: neu * normal_derivative(nr, xb) + dir_ * exact_solution(xb),
+        initial_guess=exact_solution(domain.get_int_bdry_nodes()),
+    )
+
+    error = np.max(np.abs(result["u"] - exact_solution(domain.get_int_bdry_nodes())))
+    assert error < 3.0e-1
+    assert result["iterations"] <= 12
+    assert result["residual_norm"] < 1.0e-8
+    assert solver.get_last_nonlinear_iterations() == result["iterations"]
+    assert solver.get_last_residual_norm() == result["residual_norm"]
+    assert np.array_equal(solver.get_output_nodes(), domain.get_int_bdry_nodes())
+
+
 def test_diffusion_solver_checks():
     domain = build_test_domain()
     nu = 0.25

@@ -180,6 +180,15 @@ class VariablePoissonSolver:
     def get_laplacian(self) -> sparse.csr_matrix:
         return self.lap
 
+    def returns_distributed_state(self) -> bool:
+        return False
+
+    def get_output_range(self) -> tuple[int, int]:
+        return (0, self.n)
+
+    def get_output_nodes(self) -> np.ndarray:
+        return self.x
+
     def get_gradient_ops(self) -> list[sparse.csr_matrix]:
         return list(self.grad)
 
@@ -191,3 +200,27 @@ class VariablePoissonSolver:
 
     def last_solve_used_nullspace(self) -> bool:
         return self.last_solve_used_nullspace_
+
+    def returnsDistributedState(self) -> bool:
+        return self.returns_distributed_state()
+
+    def getOutputRange(self) -> tuple[int, int]:
+        return self.get_output_range()
+
+    def getOutputNodes(self) -> np.ndarray:
+        return self.get_output_nodes()
+
+    def getLaplacian(self) -> sparse.csr_matrix:
+        return self.get_laplacian()
+
+    def getGradientOps(self) -> list[sparse.csr_matrix]:
+        return self.get_gradient_ops()
+
+    def getLastPdeOperator(self) -> sparse.csr_matrix:
+        return self.get_last_pde_operator()
+
+    def getBCOp(self) -> sparse.csr_matrix:
+        return self.get_bc_op()
+
+    def lastSolveUsedNullspace(self) -> bool:
+        return self.last_solve_used_nullspace()
