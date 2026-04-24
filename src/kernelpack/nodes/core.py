@@ -233,7 +233,7 @@ def _poisson_strip_sample(
     dim = sample_min.size
     cell_size = float(opts["grid_radius"]) / np.sqrt(dim)
     grid_size = np.maximum(1, np.ceil((sample_max - sample_min) / cell_size).astype(int))
-    grid: dict[tuple[int, ...], int] = {}
+    grid = np.full(tuple(int(v) for v in grid_size), -1, dtype=int)
     points: list[np.ndarray] = []
     active: list[int] = []
     rng = np.random.Generator(np.random.MT19937(int(seed)))
@@ -251,7 +251,7 @@ def _poisson_strip_sample(
         accepted = False
         for _ in range(int(opts["attempts"])):
             candidate = _propose_candidate(base, active_radius, rng)
-            if np.any(candidate < sample_min) or np.any(candidate > sample_max):
+            if not _point_in_box(candidate, sample_min, sample_max):
                 continue
             if _has_conflicting_neighbor(candidate, active_idx, points, grid, sample_min, cell_size, grid_size, opts):
                 continue
@@ -271,9 +271,18 @@ def _poisson_strip_sample(
 def _propose_candidate(base: np.ndarray, radius: float, rng: np.random.Generator) -> np.ndarray:
     dim = base.size
     direction = rng.normal(size=dim)
-    direction = direction / max(np.linalg.norm(direction), np.finfo(float).eps)
+    norm_sq = float(np.dot(direction, direction))
+    inv_norm = 1.0 / max(np.sqrt(norm_sq), np.finfo(float).eps)
+    direction = direction * inv_norm
     shell_radius = radius * (1.0 + rng.random() * (2**dim - 1)) ** (1.0 / dim)
     return base + shell_radius * direction
+
+
+def _point_in_box(point: np.ndarray, sample_min: np.ndarray, sample_max: np.ndarray) -> bool:
+    for d in range(point.size):
+        if point[d] < sample_min[d] or point[d] > sample_max[d]:
+            return False
+    return True
 
 
 def _local_radius(point: np.ndarray, opts: dict[str, object]) -> float:
@@ -316,7 +325,7 @@ def _has_conflicting_neighbor(
     point: np.ndarray,
     active_idx: int,
     points: list[np.ndarray],
-    grid: dict[tuple[int, ...], int],
+    grid: np.ndarray,
     x_min: np.ndarray,
     cell_size: float,
     grid_size: np.ndarray,
@@ -338,21 +347,62 @@ def _has_conflicting_neighbor(
     else:
         raise ValueError("unknown Poisson sampling mode")
 
-    idx = np.asarray(_point_to_cell(point, x_min, cell_size))
+    idx = _point_to_cell(point, x_min, cell_size)
     reach = max(1, int(np.ceil(radius_for_reach / cell_size)))
-    ranges = [range(max(1, idx[d] - reach), min(grid_size[d], idx[d] + reach) + 1) for d in range(idx.size)]
+    if point.size == 2:
+        x0_lo = max(0, idx[0] - reach)
+        x0_hi = min(int(grid_size[0]) - 1, idx[0] + reach)
+        x1_lo = max(0, idx[1] - reach)
+        x1_hi = min(int(grid_size[1]) - 1, idx[1] + reach)
+        for i0 in range(x0_lo, x0_hi + 1):
+            for i1 in range(x1_lo, x1_hi + 1):
+                j = int(grid[i0, i1])
+                if j < 0:
+                    continue
+                if exclude_active and j == active_idx:
+                    continue
+                if pairwise:
+                    threshold = max(candidate_radius, _local_radius(points[j], opts))
+                else:
+                    threshold = candidate_radius
+                if _squared_distance(point, points[j]) < threshold * threshold:
+                    return True
+        return False
+    if point.size == 3:
+        x0_lo = max(0, idx[0] - reach)
+        x0_hi = min(int(grid_size[0]) - 1, idx[0] + reach)
+        x1_lo = max(0, idx[1] - reach)
+        x1_hi = min(int(grid_size[1]) - 1, idx[1] + reach)
+        x2_lo = max(0, idx[2] - reach)
+        x2_hi = min(int(grid_size[2]) - 1, idx[2] + reach)
+        for i0 in range(x0_lo, x0_hi + 1):
+            for i1 in range(x1_lo, x1_hi + 1):
+                for i2 in range(x2_lo, x2_hi + 1):
+                    j = int(grid[i0, i1, i2])
+                    if j < 0:
+                        continue
+                    if exclude_active and j == active_idx:
+                        continue
+                    if pairwise:
+                        threshold = max(candidate_radius, _local_radius(points[j], opts))
+                    else:
+                        threshold = candidate_radius
+                    if _squared_distance(point, points[j]) < threshold * threshold:
+                        return True
+        return False
+    ranges = [range(max(0, idx[d] - reach), min(int(grid_size[d]) - 1, idx[d] + reach) + 1) for d in range(point.size)]
     for cell in product(*ranges):
-        key = tuple(int(v) for v in cell)
-        if key not in grid:
+        zero_cell = tuple(int(v) for v in cell)
+        j = int(grid[zero_cell])
+        if j < 0:
             continue
-        j = grid[key]
         if exclude_active and j == active_idx:
             continue
         if pairwise:
             threshold = max(candidate_radius, _local_radius(points[j], opts))
         else:
             threshold = candidate_radius
-        if np.linalg.norm(point - points[j]) < threshold:
+        if _squared_distance(point, points[j]) < threshold * threshold:
             return True
     return False
 
@@ -377,7 +427,12 @@ def _flatten_strip_clouds(local_clouds: list[np.ndarray], x_min: np.ndarray, x_m
 
 
 def _point_to_cell(point: np.ndarray, x_min: np.ndarray, cell_size: float) -> tuple[int, ...]:
-    return tuple(np.maximum(1, np.floor((point - x_min) / cell_size).astype(int) + 1))
+    return tuple(max(0, int(np.floor((point[d] - x_min[d]) / cell_size))) for d in range(point.size))
+
+
+def _squared_distance(x: np.ndarray, y: np.ndarray) -> float:
+    diff = x - y
+    return float(np.dot(diff, diff))
 
 
 def clip_points_by_geometry(
