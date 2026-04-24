@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import product
 from typing import Callable
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from kernelpack.domain import DomainDescriptor
 from kernelpack.geometry import RBFLevelSet
@@ -170,6 +172,7 @@ def _parse_poisson_options(
         "boundary_refinement_fraction": float(boundary_refinement_fraction),
         "boundary_distance": float(boundary_distance),
         "has_boundary_refinement": has_boundary_refinement,
+        "boundary_tree": cKDTree(boundary_points) if boundary_points.shape[0] > 0 else None,
         "grid_radius": float(grid_radius),
         "split_tol": float(min_radius),
     }
@@ -295,7 +298,11 @@ def _local_radius(point: np.ndarray, opts: dict[str, object]) -> float:
 def _boundary_rad_frac(point: np.ndarray, opts: dict[str, object]) -> float:
     if not bool(opts["has_boundary_refinement"]):
         return 1.0
-    dist = _nearest_boundary_distance(point, np.asarray(opts["boundary_points"], dtype=float))
+    dist = _nearest_boundary_distance(
+        point,
+        np.asarray(opts["boundary_points"], dtype=float),
+        opts.get("boundary_tree"),
+    )
     if dist <= float(opts["boundary_distance"]):
         return float(opts["boundary_refinement_fraction"])
     return 1.0
@@ -334,7 +341,7 @@ def _has_conflicting_neighbor(
     idx = np.asarray(_point_to_cell(point, x_min, cell_size))
     reach = max(1, int(np.ceil(radius_for_reach / cell_size)))
     ranges = [range(max(1, idx[d] - reach), min(grid_size[d], idx[d] + reach) + 1) for d in range(idx.size)]
-    for cell in np.array(np.meshgrid(*ranges)).T.reshape(-1, idx.size):
+    for cell in product(*ranges):
         key = tuple(int(v) for v in cell)
         if key not in grid:
             continue
@@ -350,11 +357,12 @@ def _has_conflicting_neighbor(
     return False
 
 
-def _nearest_boundary_distance(point: np.ndarray, boundary_points: np.ndarray) -> float:
+def _nearest_boundary_distance(point: np.ndarray, boundary_points: np.ndarray, boundary_tree: cKDTree | None = None) -> float:
     if boundary_points.size == 0:
         return float("inf")
-    diffs = boundary_points - point
-    return float(np.sqrt(np.nanmin(np.sum(diffs * diffs, axis=1))))
+    tree = boundary_tree if boundary_tree is not None else cKDTree(boundary_points)
+    dist, _ = tree.query(point, k=1)
+    return float(dist)
 
 
 def _flatten_strip_clouds(local_clouds: list[np.ndarray], x_min: np.ndarray, x_max: np.ndarray) -> np.ndarray:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import product
 
 import numpy as np
 from scipy.spatial import Delaunay, cKDTree
@@ -105,6 +106,30 @@ def weighted_sample_elimination_mis(x: np.ndarray, radius: float) -> np.ndarray:
             if j != i:
                 blocked[j] = True
     return keep
+
+
+def _connected_components_within_radius(x: np.ndarray, radius: float) -> list[np.ndarray]:
+    x = np.asarray(x, dtype=float)
+    if x.shape[0] == 0:
+        return []
+    tree = cKDTree(x)
+    visited = np.zeros(x.shape[0], dtype=bool)
+    components: list[np.ndarray] = []
+    for i in range(x.shape[0]):
+        if visited[i]:
+            continue
+        stack = [i]
+        visited[i] = True
+        component: list[int] = []
+        while stack:
+            j = stack.pop()
+            component.append(j)
+            for nbr in tree.query_ball_point(x[j], radius):
+                if not visited[nbr]:
+                    visited[nbr] = True
+                    stack.append(nbr)
+        components.append(np.asarray(component, dtype=int))
+    return components
 
 
 def resample_closed_curve_by_arc_length(curve: np.ndarray, target_count: int) -> np.ndarray:
@@ -318,9 +343,9 @@ class RBFLevelSet:
     def _estimate_offset_distance(x: np.ndarray) -> float:
         if x.shape[0] < 2:
             return 1e-2
-        d = distance_matrix(x, x)
-        np.fill_diagonal(d, np.inf)
-        return max(0.5 * np.min(d.min(axis=1)), 1e-3)
+        distances, _ = cKDTree(x).query(x, k=2)
+        nearest = np.asarray(distances[:, 1], dtype=float)
+        return max(0.5 * float(nearest.min(initial=np.inf)), 1e-3)
 
 
 @dataclass
@@ -772,17 +797,11 @@ class PiecewiseSmoothEmbeddedSurface:
         return self.ubox.get("p", np.zeros((0, self.xb_uniform.shape[1] if self.xb_uniform.size else 0)))
 
     def _deduplicate_boundary(self, x: np.ndarray, n: np.ndarray, seg_map: np.ndarray, corner_flags: np.ndarray, tol: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        d = distance_matrix(x, x)
-        visited = np.zeros(x.shape[0], dtype=bool)
         x_keep = []
         n_keep = []
         seg_keep = []
         corner_keep = []
-        for i in range(x.shape[0]):
-            if visited[i]:
-                continue
-            cluster = np.flatnonzero(d[i] <= tol)
-            visited[cluster] = True
+        for cluster in _connected_components_within_radius(x, tol):
             x_keep.append(x[cluster].mean(axis=0))
             nr = n[cluster].copy()
             ref = nr[0]
@@ -803,16 +822,18 @@ class PiecewiseSmoothEmbeddedSurface:
         return np.vstack(x_keep), np.vstack(n_keep), np.asarray(seg_keep), np.asarray(corner_keep)
 
     def _enforce_minimum_spacing(self, x: np.ndarray, n: np.ndarray, seg_map: np.ndarray, corner_flags: np.ndarray, radius: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        d = distance_matrix(x, x)
         keep = np.ones(x.shape[0], dtype=bool)
         corner_mask = corner_flags != 0
         order = np.concatenate([np.flatnonzero(corner_mask), np.flatnonzero(~corner_mask)])
         spacing_tol = radius * (1.0 - 1e-12)
+        tree = cKDTree(x)
         for idx in order:
             if not keep[idx]:
                 continue
-            nbrs = np.flatnonzero((d[idx] < spacing_tol) & (d[idx] > 0))
+            nbrs = np.asarray(tree.query_ball_point(x[idx], spacing_tol), dtype=int)
             for j in nbrs:
+                if j == idx:
+                    continue
                 if not keep[j]:
                     continue
                 if corner_mask[j] and not corner_mask[idx]:
@@ -823,9 +844,10 @@ class PiecewiseSmoothEmbeddedSurface:
 
     def _smooth_normals(self, x: np.ndarray, nr: np.ndarray, neighborhood: int) -> np.ndarray:
         out = nr.copy()
-        d = distance_matrix(x, x)
+        tree = cKDTree(x)
         for i in range(x.shape[0]):
-            take = np.argsort(d[i])[: min(neighborhood, x.shape[0])]
+            _, take = tree.query(x[i], k=min(neighborhood, x.shape[0]))
+            take = np.atleast_1d(np.asarray(take, dtype=int))
             nri = nr[take].copy()
             ref = nri[0]
             for j in range(1, nri.shape[0]):
