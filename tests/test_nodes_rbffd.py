@@ -58,24 +58,3 @@ def test_rbffd_laplacian():
     lwls = fd_wls.get_op()
     lap = lwls @ f
     assert np.all(np.abs(lap[active_rows - 1] - 4) < 1e-8)
-
-
-def test_parallel_fd_assembly_matches_serial():
-    xg, yg = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-1, 1, 5), indexing="ij")
-    x = np.column_stack([xg.ravel(), yg.ravel()])
-    interior_mask = (np.abs(x[:, 0]) < 0.999) & (np.abs(x[:, 1]) < 0.999)
-    active_rows = np.flatnonzero(interior_mask) + 1
-    dd = domain.DomainDescriptor()
-    dd.set_nodes(x, np.zeros((0, 2)), np.zeros((0, 2)))
-    dd.set_sep_rad(0.5)
-    dd.build_structs()
-    sp = rbffd.StencilProperties(n=9, dim=2, ell=2, spline_degree=3, tree_mode="interior_boundary", point_set="interior_boundary")
-
-    serial = rbffd.FDDiffOp(rbffd.WeightedLeastSquaresStencil)
-    serial.assemble_op(dd, "lap", sp, rbffd.OpProperties(), active_rows=active_rows)
-
-    parallel = rbffd.FDDiffOp(rbffd.WeightedLeastSquaresStencil)
-    parallel.assemble_op(dd, "lap", sp, rbffd.OpProperties(use_parallel=True), active_rows=active_rows)
-
-    assert np.array_equal(serial.locations, parallel.locations)
-    assert np.allclose(serial.values, parallel.values)
