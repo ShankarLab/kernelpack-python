@@ -7,6 +7,7 @@ from typing import Callable
 
 import numpy as np
 from scipy import sparse
+from scipy import linalg as dense_linalg
 
 from kernelpack._numba import build_augmented_rbf_lhs, normalize_stencil_points, phs_dr_over_r_matrix, phs_kernel_matrix, phs_lap_matrix
 from kernelpack.domain import DomainDescriptor
@@ -342,9 +343,12 @@ class RBFStencil:
         # Normal stencils should solve cleanly with a dense direct solve. The
         # pseudo-inverse fallback keeps the port alive on nearly singular cases
         # that occasionally arise in tiny or pathological stencils.
-        x = np.linalg.solve(a, b)
+        try:
+            x = dense_linalg.solve(a, b, assume_a="sym", check_finite=False, overwrite_b=False)
+        except dense_linalg.LinAlgError:
+            x = np.linalg.solve(a, b)
         if np.any(~np.isfinite(x)):
-            x = np.linalg.pinv(a) @ b
+            x = dense_linalg.pinv(a, check_finite=False) @ b
         x[~np.isfinite(x)] = 0.0
         return x
 

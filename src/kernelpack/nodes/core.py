@@ -235,11 +235,13 @@ def _poisson_strip_sample(
     grid_size = np.maximum(1, np.ceil((sample_max - sample_min) / cell_size).astype(int))
     grid = np.full(tuple(int(v) for v in grid_size), -1, dtype=int)
     points: list[np.ndarray] = []
+    point_radii: list[float] = []
     active: list[int] = []
     rng = np.random.Generator(np.random.MT19937(int(seed)))
 
     x0 = sample_min + rng.random(dim) * (sample_max - sample_min)
     points.append(x0)
+    point_radii.append(_local_radius(x0, opts))
     active.append(0)
     grid[_point_to_cell(x0, sample_min, cell_size)] = 0
 
@@ -247,16 +249,18 @@ def _poisson_strip_sample(
         pick = int(rng.integers(len(active)))
         active_idx = active[pick]
         base = points[active_idx]
-        active_radius = _local_radius(base, opts)
+        active_radius = point_radii[active_idx]
         accepted = False
         for _ in range(int(opts["attempts"])):
             candidate = _propose_candidate(base, active_radius, rng)
             if not _point_in_box(candidate, sample_min, sample_max):
                 continue
-            if _has_conflicting_neighbor(candidate, active_idx, points, grid, sample_min, cell_size, grid_size, opts):
+            candidate_radius = _local_radius(candidate, opts)
+            if _has_conflicting_neighbor(candidate, candidate_radius, active_idx, points, point_radii, grid, sample_min, cell_size, grid_size, opts):
                 continue
             idx = len(points)
             points.append(candidate)
+            point_radii.append(candidate_radius)
             active.append(idx)
             grid[_point_to_cell(candidate, sample_min, cell_size)] = idx
             accepted = True
@@ -323,8 +327,10 @@ def _boundary_refined_radius(point: np.ndarray, opts: dict[str, object]) -> floa
 
 def _has_conflicting_neighbor(
     point: np.ndarray,
+    candidate_radius: float,
     active_idx: int,
     points: list[np.ndarray],
+    point_radii: list[float],
     grid: np.ndarray,
     x_min: np.ndarray,
     cell_size: float,
@@ -334,7 +340,6 @@ def _has_conflicting_neighbor(
     # Neighbor rejection rules differ slightly between the plain and
     # boundary-refined modes. The refined fixed-radius mode checks a symmetric
     # pairwise threshold to preserve the near-boundary radius reduction.
-    candidate_radius = _local_radius(point, opts)
     mode = str(opts["mode"])
     if mode == "fixed_radius_with_boundary_refinement":
         radius_for_reach = max(candidate_radius, float(opts["radius"]))
@@ -362,7 +367,7 @@ def _has_conflicting_neighbor(
                 if exclude_active and j == active_idx:
                     continue
                 if pairwise:
-                    threshold = max(candidate_radius, _local_radius(points[j], opts))
+                    threshold = max(candidate_radius, point_radii[j])
                 else:
                     threshold = candidate_radius
                 if _squared_distance(point, points[j]) < threshold * threshold:
@@ -384,7 +389,7 @@ def _has_conflicting_neighbor(
                     if exclude_active and j == active_idx:
                         continue
                     if pairwise:
-                        threshold = max(candidate_radius, _local_radius(points[j], opts))
+                        threshold = max(candidate_radius, point_radii[j])
                     else:
                         threshold = candidate_radius
                     if _squared_distance(point, points[j]) < threshold * threshold:
@@ -399,7 +404,7 @@ def _has_conflicting_neighbor(
         if exclude_active and j == active_idx:
             continue
         if pairwise:
-            threshold = max(candidate_radius, _local_radius(points[j], opts))
+            threshold = max(candidate_radius, point_radii[j])
         else:
             threshold = candidate_radius
         if _squared_distance(point, points[j]) < threshold * threshold:
