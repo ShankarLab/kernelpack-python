@@ -38,9 +38,9 @@ def resolve_stencil_factory(stencil_spec: str | Callable[[], object]) -> Callabl
         return stencil_spec
     name = str(stencil_spec).lower()
     if name in {"rbf", "rbffd", "rbf-fd"}:
-        return lambda: RBFStencil()
+        return RBFStencil
     if name in {"wls", "weightedleastsquares", "weighted_least_squares"}:
-        return lambda: WeightedLeastSquaresStencil()
+        return WeightedLeastSquaresStencil
     raise ValueError(f"unknown stencil backend {stencil_spec}")
 
 

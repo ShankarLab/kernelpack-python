@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from math import ceil
 from typing import Callable
@@ -484,57 +486,65 @@ class FDDiffOp:
         knn_indices = _query_center_stencils(domain, st_props.tree_mode, center_points, st_props.n)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
-        all_indices = []
-        all_weights = []
-        all_stencils = []
-        centers_recorded = []
-        globals_recorded = np.zeros(active_rows.size, dtype=int)
-        row_ids = np.zeros(active_rows.size, dtype=int)
         use_boundary = neu_coeff is not None or dir_coeff is not None
-        for k, local_row in enumerate(active_rows):
-            indices, w, stencil, center_point, row_id, global_id = _assemble_one(
-                self.approx_factory,
-                stencil_points,
-                knn_indices[int(local_row) - 1],
-                center_points,
-                center_row_ids,
-                center_col_globals,
-                center_normals,
-                int(local_row),
-                st_props,
-                op_props,
-                op_name,
-                use_boundary,
-                neu_coeff,
-                dir_coeff,
+        if op_props.use_parallel and active_rows.size > 1:
+            chunk_count = min(active_rows.size, max(os.cpu_count() or 1, 1))
+            row_chunks = [chunk for chunk in np.array_split(active_rows, chunk_count) if chunk.size]
+            worker_args = [
+                (
+                    self.approx_factory,
+                    stencil_points,
+                    stencil_globals,
+                    knn_indices[chunk - 1],
+                    center_points,
+                    center_row_ids,
+                    center_col_globals,
+                    center_normals,
+                    chunk,
+                    st_props,
+                    op_props,
+                    op_name,
+                    use_boundary,
+                    neu_coeff,
+                    dir_coeff,
+                )
+                for chunk in row_chunks
+            ]
+            with ProcessPoolExecutor(max_workers=len(worker_args)) as executor:
+                chunk_results = list(executor.map(_assemble_rows_chunk, worker_args))
+            self.locations = np.vstack([result[0] for result in chunk_results if result[0].size]) if chunk_results else np.zeros((0, 2), dtype=int)
+            self.values = np.concatenate([result[1] for result in chunk_results if result[1].size]) if chunk_results else np.zeros(0)
+            self.recorded_stencil_centers = [center for result in chunk_results for center in result[2]]
+            self.recorded_stencil_globals = (
+                np.concatenate([result[3] for result in chunk_results if result[3].size]) if chunk_results else np.zeros(0, dtype=int)
             )
-            all_indices.append(indices)
-            all_weights.append(w)
-            all_stencils.append(stencil)
-            centers_recorded.append(center_point)
-            globals_recorded[k] = global_id
-            row_ids[k] = row_id
-        triplet_count = active_rows.size * st_props.n
-        self.locations = np.zeros((triplet_count, 2), dtype=int)
-        self.values = np.zeros(triplet_count)
-        cursor = 0
-        self.stencils = []
-        self.recorded_stencil_centers = []
-        self.recorded_stencil_globals = globals_recorded
-        for k in range(active_rows.size):
-            cols = all_indices[k]
-            w = all_weights[k]
-            row_global = row_ids[k]
-            next_cursor = cursor + cols.size
-            self.locations[cursor:next_cursor, 0] = row_global
-            self.locations[cursor:next_cursor, 1] = stencil_globals[cols - 1]
-            self.values[cursor:next_cursor] = w[: cols.size, 0]
-            cursor = next_cursor
-            self.recorded_stencil_centers.append(centers_recorded[k])
-            if op_props.record_stencils:
-                self.stencils.append({"Approx": all_stencils[k], "Indices": stencil_globals[cols - 1]})
-        self.locations = self.locations[:cursor]
-        self.values = self.values[:cursor]
+            self.stencils = [stencil for result in chunk_results for stencil in result[4]] if op_props.record_stencils else []
+        else:
+            (
+                self.locations,
+                self.values,
+                self.recorded_stencil_centers,
+                self.recorded_stencil_globals,
+                self.stencils,
+            ) = _assemble_rows_chunk(
+                (
+                    self.approx_factory,
+                    stencil_points,
+                    stencil_globals,
+                    knn_indices[active_rows - 1],
+                    center_points,
+                    center_row_ids,
+                    center_col_globals,
+                    center_normals,
+                    active_rows,
+                    st_props,
+                    op_props,
+                    op_name,
+                    use_boundary,
+                    neu_coeff,
+                    dir_coeff,
+                )
+            )
 
     def get_op(self) -> sparse.csr_matrix:
         if self.locations.size == 0:
@@ -642,6 +652,79 @@ def _assemble_one(
     else:
         w = stencil.compute_weights(loc_x, st_props, op_props, op_name, 1)
     return indices, w, stencil, center_point, center_row_id, center_col_global
+
+
+def _assemble_rows_chunk(
+    args: tuple[
+        Callable[[], object],
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray,
+        np.ndarray | None,
+        np.ndarray,
+        StencilProperties,
+        OpProperties,
+        str,
+        bool,
+        np.ndarray | None,
+        np.ndarray | None,
+    ],
+) -> tuple[np.ndarray, np.ndarray, list[np.ndarray], np.ndarray, list[dict[str, object]]]:
+    (
+        approx_factory,
+        stencil_points,
+        stencil_globals,
+        knn_indices,
+        center_points,
+        center_row_ids,
+        center_col_globals,
+        center_normals,
+        active_rows,
+        st_props,
+        op_props,
+        op_name,
+        use_boundary,
+        neu_coeff,
+        dir_coeff,
+    ) = args
+    active_rows = np.asarray(active_rows, dtype=int)
+    triplet_count = active_rows.size * st_props.n
+    locations = np.zeros((triplet_count, 2), dtype=int)
+    values = np.zeros(triplet_count)
+    centers_recorded: list[np.ndarray] = []
+    globals_recorded = np.zeros(active_rows.size, dtype=int)
+    stencils: list[dict[str, object]] = []
+    cursor = 0
+    for k, local_row in enumerate(active_rows):
+        indices, w, stencil, center_point, row_id, global_id = _assemble_one(
+            approx_factory,
+            stencil_points,
+            knn_indices[k],
+            center_points,
+            center_row_ids,
+            center_col_globals,
+            center_normals,
+            int(local_row),
+            st_props,
+            op_props,
+            op_name,
+            use_boundary,
+            neu_coeff,
+            dir_coeff,
+        )
+        next_cursor = cursor + indices.size
+        locations[cursor:next_cursor, 0] = row_id
+        locations[cursor:next_cursor, 1] = stencil_globals[indices - 1]
+        values[cursor:next_cursor] = w[: indices.size, 0]
+        cursor = next_cursor
+        centers_recorded.append(center_point)
+        globals_recorded[k] = global_id
+        if op_props.record_stencils:
+            stencils.append({"Approx": stencil, "Indices": stencil_globals[indices - 1]})
+    return locations[:cursor], values[:cursor], centers_recorded, globals_recorded, stencils
 
 
 def _query_center_stencils(domain: DomainDescriptor, tree_mode: str, center_points: np.ndarray, stencil_size: int) -> np.ndarray:
