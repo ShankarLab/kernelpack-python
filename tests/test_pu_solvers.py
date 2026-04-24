@@ -120,6 +120,21 @@ def test_pusl_advection_constant_preservation():
     assert np.max(np.abs(c1 - 2.0)) < 5.0e-4
 
 
+def test_pusl_forward_advection_uses_defect_correction():
+    domain = build_test_domain()
+    solver = solvers.PUSLAdvectionSolver()
+    solver.init(domain, 4, 0.01)
+    xout = solver.get_output_nodes()
+    c0 = (1.0 + 0.25 * xout[:, 0] - 0.1 * xout[:, 1]).reshape(-1, 1)
+    velocity = lambda t, x: np.column_stack([-x[:, 1], x[:, 0]])
+    solver.reset_solve_stats()
+    c1 = solver.forward_sl_step(0.0, c0, velocity)
+    stats = solver.get_solve_stats()
+    assert c1.shape == c0.shape
+    assert np.all(np.isfinite(c1))
+    assert stats["defect_correction_solves"] >= 1
+
+
 def test_pusl_fd_advection_diffusion_smoke():
     domain = build_test_domain()
     solver = solvers.PUSLFDAdvectionDiffusionSolver()

@@ -56,6 +56,14 @@ class PUSLAdvectionSolver:
             "inflow_value": None,
         }
     )
+    solve_stats: dict[str, int] = field(
+        default_factory=lambda: {
+            "moved_solves_zero_defect": 0,
+            "moved_solves_one_defect": 0,
+            "moved_solves_two_defect": 0,
+            "defect_correction_solves": 0,
+        }
+    )
 
     def clear_advection_boundary_condition(self) -> None:
         self.boundary_condition = {
@@ -164,18 +172,63 @@ class PUSLAdvectionSolver:
         velocity: Callable[[float, np.ndarray], np.ndarray],
         rk: Callable[[float, np.ndarray, float, Callable[[float, np.ndarray], np.ndarray]], np.ndarray] | None = None,
     ) -> np.ndarray:
-        xarr = trace_points_forward(self.output_nodes, tn, self.dt, velocity, rk)
-        values = localized_evaluate(self, coeffs_old, xarr)
-        return localized_evaluate(self, values, self.output_nodes)
+        coeffs_old = np.asarray(coeffs_old, dtype=float)
+        nodal_old = self.evaluate_at_nodes(coeffs_old)
+        if nodal_old.ndim == 1:
+            nodal_old = nodal_old[:, None]
+
+        preserve_mass = self.boundary_condition["mode"] != "inflow_dirichlet"
+        target_mass = None
+        if preserve_mass:
+            target_mass = np.array([self.total_mass(coeffs_old, col + 1) for col in range(nodal_old.shape[1])], dtype=float)
+
+        rhs_local = nodal_old.copy()
+        nodal_current = nodal_old.copy()
+        traced_points = trace_points_forward(self.output_nodes, tn, self.dt, velocity, rk)
+
+        max_defect_sweeps = 4
+        corrections_used = 0
+        for _ in range(max_defect_sweeps):
+            forward_values = localized_evaluate(self, nodal_current, traced_points)
+            residual_local = rhs_local - forward_values
+            resid_norm = float(np.max(np.abs(residual_local))) if residual_local.size else 0.0
+            mass_resid_norm = 0.0
+            mass_resid = None
+            if preserve_mass and target_mass is not None:
+                current_mass = np.array([self.total_mass(nodal_current, col + 1) for col in range(nodal_current.shape[1])], dtype=float)
+                mass_resid = target_mass - current_mass
+                mass_resid_norm = float(np.max(np.abs(mass_resid))) if mass_resid.size else 0.0
+            if resid_norm <= 1.0e-10 and (not preserve_mass or mass_resid_norm <= 1.0e-12):
+                break
+            nodal_current += residual_local
+            corrections_used += 1
+            self.solve_stats["defect_correction_solves"] += 1
+
+        if corrections_used == 0:
+            self.solve_stats["moved_solves_zero_defect"] += 1
+        elif corrections_used == 1:
+            self.solve_stats["moved_solves_one_defect"] += 1
+        else:
+            self.solve_stats["moved_solves_two_defect"] += 1
+
+        coeffs_new = self.project_samples(nodal_current)
+        if preserve_mass and target_mass is not None:
+            coeffs_new = enforce_global_mass_correction(self, coeffs_new, target_mass)
+        return coeffs_new
 
     def set_step_size(self, dlt: float) -> None:
         self.dt = dlt
 
     def reset_solve_stats(self) -> None:
-        return
+        self.solve_stats = {
+            "moved_solves_zero_defect": 0,
+            "moved_solves_one_defect": 0,
+            "moved_solves_two_defect": 0,
+            "defect_correction_solves": 0,
+        }
 
     def get_solve_stats(self) -> dict[str, object]:
-        return {}
+        return dict(self.solve_stats)
 
     def get_num_patches(self) -> int:
         return self.patch_centers.shape[0]
@@ -318,6 +371,19 @@ def apply_boundary_condition(
     if mode == "periodic":
         raise ValueError("Periodic PU-SL transport is not yet supported")
     return values
+
+
+def enforce_global_mass_correction(obj: PUSLAdvectionSolver, coeffs: np.ndarray, target_mass: np.ndarray) -> np.ndarray:
+    coeffs = np.asarray(coeffs, dtype=float)
+    if coeffs.ndim == 1:
+        coeffs = coeffs[:, None]
+    corrected = coeffs.copy()
+    measure = max(obj.get_domain_measure(), 1.0e-14)
+    for col in range(corrected.shape[1]):
+        current_mass = obj.total_mass(corrected, col + 1)
+        alpha = (float(target_mass[col]) - current_mass) / measure
+        corrected[:, col] += alpha
+    return corrected
 
 
 def estimate_domain_measure(domain: DomainDescriptor) -> float:
