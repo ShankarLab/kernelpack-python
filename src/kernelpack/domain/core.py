@@ -31,6 +31,10 @@ class DomainDescriptor:
     boundary_level_sets: list[object] = field(default_factory=list)
 
     def set_nodes(self, int_nodes: np.ndarray, bdry_nodes: np.ndarray, ghost_nodes: np.ndarray | None = None) -> None:
+        # Normalize the three node groups into the internal storage layout used
+        # everywhere else in the package. The descriptor keeps the physically
+        # meaningful partitions (`xi`, `xb`, `xg`) as well as concatenated views
+        # that make assembly/query code simpler.
         int_nodes = np.asarray(int_nodes, dtype=float)
         bdry_nodes = np.asarray(bdry_nodes, dtype=float)
         if ghost_nodes is None:
@@ -56,6 +60,9 @@ class DomainDescriptor:
         self.boundary_level_sets = level_sets
 
     def build_structs(self) -> None:
+        # Build the search structures once after the node sets are finalized.
+        # Most downstream code asks the descriptor for one of three search
+        # spaces: all nodes, interior+boundary nodes, or boundary nodes only.
         self.tall_tree = self._build_tree_struct(self.xf)
         self.int_bdry_tree = self._build_tree_struct(self.x)
         self.bdry_tree = self._build_tree_struct(self.xb)
@@ -68,10 +75,14 @@ class DomainDescriptor:
             return np.zeros((query_points.shape[0], 0), dtype=int), np.zeros((query_points.shape[0], 0))
         k = min(int(k), points.shape[0])
         if tree and tree.has_searcher and tree.searcher is not None:
+            # Use the KD-tree when available: this is the hot path for stencil
+            # construction, so we keep the fallback path only for completeness.
             distances, indices = tree.searcher.query(query_points, k=k)
             indices = np.atleast_2d(indices)
             distances = np.atleast_2d(distances)
             return indices, distances
+        # Fallback for degenerate cases where we deliberately did not build a
+        # searcher. This keeps the descriptor usable even with tiny point sets.
         d = distance_matrix(query_points, points)
         order = np.argsort(d, axis=1)[:, :k]
         distances = np.take_along_axis(d, order, axis=1)
@@ -151,6 +162,9 @@ class DomainDescriptor:
         return self.xb.shape[0]
 
     def _set_total_nodes(self) -> None:
+        # Maintain the concatenated node arrays expected by the assembler code.
+        # `x` is the physical point cloud (interior + boundary), while `xf`
+        # appends ghost nodes for methods that need the full augmented domain.
         dim = self.xi.shape[1] if self.xi.size else self.xb.shape[1]
         if self.xg.size == 0:
             self.xg = np.zeros((0, dim))
@@ -172,6 +186,8 @@ class DomainDescriptor:
         points = np.asarray(points, dtype=float)
         if points.size == 0:
             return TreeStruct(points=points, searcher=None, has_searcher=False)
+        # Cache a KD-tree directly on the descriptor so repeated stencil queries
+        # do not rebuild spatial data structures.
         return TreeStruct(points=points, searcher=cKDTree(points), has_searcher=True)
 
 

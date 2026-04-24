@@ -108,6 +108,9 @@ def weighted_sample_elimination_mis(x: np.ndarray, radius: float) -> np.ndarray:
 
 
 def resample_closed_curve_by_arc_length(curve: np.ndarray, target_count: int) -> np.ndarray:
+    # The Matlab port now chooses 2D closed-curve samples by arc length rather
+    # than a generic MIS downsampling pass. This keeps neighboring boundary
+    # samples more uniform around smooth curves.
     curve = np.asarray(curve, dtype=float)
     n = curve.shape[0]
     if n == 0:
@@ -193,6 +196,8 @@ class RBFLevelSet:
     poly_coeffs: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def build_level_set_from_cfi(self, x: np.ndarray, nr: np.ndarray, spline_degree: int = 3) -> None:
+        # Construct a compact signed-distance surrogate from boundary points and
+        # normals using the usual CFI-style inside/outside offset constraints.
         x = np.asarray(x, dtype=float)
         nr = normalize_rows(np.asarray(nr, dtype=float))
         self.dim = x.shape[1]
@@ -224,6 +229,8 @@ class RBFLevelSet:
         return self.evaluate_model(model, xe)
 
     def evaluate_gradient(self, xe: np.ndarray) -> np.ndarray:
+        # Differentiate the RBF interpolant analytically with respect to each
+        # physical coordinate.
         xe = np.asarray(xe, dtype=float)
         r = distance_matrix(xe, self.centers)
         dphi = self.m_spline_degree * r ** max(self.m_spline_degree - 2, 0)
@@ -345,6 +352,9 @@ class EmbeddedSurface:
         self.n = self.sample_sites.shape[0]
 
     def build_closed_geometric_model_ps(self, dim: int, rad: float, nb: int, ne: int | None = None, method: int = 1, supersample_fac: int = 2) -> None:
+        # Build the smooth closed geometry model and then choose an evaluation
+        # sample set. The 2D and 3D cases share the same idea but use different
+        # parameterizations and sampling strategies.
         self.sep_rad = rad
         self.nd = min(nb, self.data_sites.shape[0])
         data = self.data_sites[: self.nd]
@@ -361,6 +371,8 @@ class EmbeddedSurface:
             _, dn = self._eval_closed_curve_frame(t)
             self.data_site_nrmls = dn
             if method == 1:
+                # Oversample the smooth closed curve first, then resample by arc
+                # length so the boundary cloud matches the newer Matlab behavior.
                 ns = max(round(supersample_fac * 1.5 * ntarget), ntarget)
                 ts = np.linspace(0.0, 1.0, ns, endpoint=False)
                 ptss = self._eval_closed_curve(ts)
@@ -373,6 +385,8 @@ class EmbeddedSurface:
                 self.sample_sites = ptss[keep_inds]
                 self.nrmls = nr[keep_inds]
             else:
+                # The direct path evaluates exactly the requested number of
+                # samples without any secondary resampling pass.
                 ns = ntarget
                 ts = np.linspace(0.0, 1.0, ns, endpoint=False)
                 self.sample_sites = self._eval_closed_curve(ts)
@@ -380,6 +394,7 @@ class EmbeddedSurface:
             self.uniform_sample_sites = self.sample_sites
             self.uniform_nrmls = self.nrmls
         elif dim == 3:
+            # Closed surfaces still use the older oversample-and-MIS pattern.
             center = data.mean(axis=0)
             local = data - center
             uvw = cart2sph_rows(local)

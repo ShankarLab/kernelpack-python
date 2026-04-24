@@ -53,6 +53,9 @@ class DiffusionSolver:
     cached_dir_coeff_: np.ndarray = field(default_factory=lambda: np.zeros(0))
 
     def init(self, domain: DomainDescriptor, xi: int, dlt: float, d_coeff: float, num_omp_threads: int = 1) -> None:
+        # Assemble the time-independent Laplacian once up front. Boundary rows
+        # may or may not be reusable depending on whether the boundary
+        # coefficients are fixed in time.
         self.domain = domain
         self.xi = xi
         self.dt = dlt
@@ -88,6 +91,8 @@ class DiffusionSolver:
         self.fixed_bc_coefficients_ready_ = False
 
     def set_initial_state(self, c0: np.ndarray) -> None:
+        # BDF1 starts from a single physical state. We clear the higher-order
+        # history so later steps know how many completed states are available.
         self.cnm2 = validate_physical_state(c0, self.n)
         self.cnm1 = np.zeros(0)
         self.cn = np.zeros(0)
@@ -96,6 +101,8 @@ class DiffusionSolver:
         self.fixed_bc_coefficients_ready_ = False
 
     def set_state_history(self, *states: np.ndarray) -> None:
+        # Allow callers to bootstrap directly into BDF2/BDF3 by seeding one,
+        # two, or three already-computed physical states.
         if len(states) == 1:
             self.set_initial_state(states[0])
         elif len(states) == 2:
@@ -128,6 +135,7 @@ class DiffusionSolver:
         dir_coeff_func: Callable[..., np.ndarray] | np.ndarray,
         bc: Callable[..., np.ndarray] | np.ndarray,
     ) -> np.ndarray:
+        # First-order startup step: u^{n+1} - dt * nu * Lap u^{n+1} = u^n + dt f.
         if self.cnm2.size == 0:
             raise ValueError("bdf1_step requires set_initial_state first")
         previous = self.current_physical_state()
@@ -142,6 +150,7 @@ class DiffusionSolver:
         dir_coeff_func: Callable[..., np.ndarray] | np.ndarray,
         bc: Callable[..., np.ndarray] | np.ndarray,
     ) -> np.ndarray:
+        # Standard two-step BDF update once one previous implicit step exists.
         if self.completed_steps_ < 1:
             raise ValueError("bdf2_step requires one prior step in the state history")
         rhs_physical = (4 / 3) * self.cnm1 - (1 / 3) * self.cnm2 + (2 / 3) * self.dt * evaluate_forcing_callback(forcing, self.nu, t, self.x)
@@ -155,6 +164,7 @@ class DiffusionSolver:
         dir_coeff_func: Callable[..., np.ndarray] | np.ndarray,
         bc: Callable[..., np.ndarray] | np.ndarray,
     ) -> np.ndarray:
+        # Third-order BDF update after two previous completed steps exist.
         if self.completed_steps_ < 2:
             raise ValueError("bdf3_step requires two prior steps in the state history")
         rhs_physical = (18 / 11) * self.cn - (9 / 11) * self.cnm1 + (2 / 11) * self.cnm2 + (6 / 11) * self.dt * evaluate_forcing_callback(forcing, self.nu, t, self.x)
@@ -169,6 +179,9 @@ class DiffusionSolver:
         bc: Callable[..., np.ndarray] | np.ndarray,
         lap_scale: float,
     ) -> np.ndarray:
+        # Shared implicit-step path: refresh boundary data, assemble the mixed
+        # interior/boundary linear system, solve for the new physical state, and
+        # rotate the stored BDF history.
         neu_coeff, dir_coeff = self._get_boundary_coefficients(t, neu_coeff_func, dir_coeff_func)
         self._ensure_boundary_operator(neu_coeff, dir_coeff)
         rhs_boundary = evaluate_transient_boundary_values(bc, neu_coeff, dir_coeff, self.nr, t, self.xb)
@@ -185,6 +198,8 @@ class DiffusionSolver:
         neu_coeff_func: Callable[..., np.ndarray] | np.ndarray,
         dir_coeff_func: Callable[..., np.ndarray] | np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        # Fixed boundary callbacks are common in examples, so cache their values
+        # once and reuse them across all time steps.
         if is_fixed_boundary_callback(neu_coeff_func) and is_fixed_boundary_callback(dir_coeff_func):
             if not self.fixed_bc_coefficients_ready_:
                 self.cached_neu_coeff_ = evaluate_boundary_coefficient(neu_coeff_func, self.xb)
@@ -194,6 +209,9 @@ class DiffusionSolver:
         return evaluate_boundary_coefficient(neu_coeff_func, self.xb, t), evaluate_boundary_coefficient(dir_coeff_func, self.xb, t)
 
     def _ensure_boundary_operator(self, neu_coeff: np.ndarray, dir_coeff: np.ndarray) -> None:
+        # Rebuild the boundary operator only when the coefficients have changed.
+        # For fixed data this turns repeated time steps into a Laplacian solve
+        # with a cached boundary block.
         if self.fixed_bc_operator_ready_ and self.bc.shape[0] > 0:
             return
         bc_assembler = make_assembler(self.bc_assembler, self.bc_stencil)

@@ -49,6 +49,9 @@ class StencilProperties:
         tree_mode: str = "all",
         point_set: str = "interior_boundary",
     ) -> "StencilProperties":
+        # Translate a user-facing accuracy request into the internal stencil
+        # parameters used by the discrete operator builders. The exact formulas
+        # here are heuristic but intentionally mirror the Matlab-side defaults.
         q = cls.default_diff_order(operator) if diff_op_order is None else diff_op_order
         p = 2 if convergence_order is None else convergence_order
         ell = max(p + q - 1, 0)
@@ -158,6 +161,9 @@ class RBFStencil:
     gz: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
 
     def initialize_geometry(self, x: np.ndarray, sp: StencilProperties) -> None:
+        # Normalize the stencil cloud around its centroid and assemble the
+        # augmented RBF-FD interpolation matrix once. Every operator row for
+        # this stencil reuses the same left-hand side.
         self.coeffs_already_computed = False
         self.s_dim = x.shape[1]
         self.n = x.shape[0]
@@ -177,6 +183,9 @@ class RBFStencil:
         self.solve_lhs = self.a
 
     def compute_weights(self, x: np.ndarray, *args: object) -> np.ndarray:
+        # The Matlab code routes both interior and boundary rows through the
+        # same public entry point. We preserve that API shape here and branch
+        # based on the argument pattern.
         if len(args) >= 7 and isinstance(args[0], np.ndarray) and args[0].shape[1] == x.shape[1]:
             nr, neu_coeff, dir_coeff, sp, op, apply_op, rhs_indices = args[:7]
             return self._compute_weights_boundary(x, nr, float(neu_coeff), float(dir_coeff), sp, op, apply_op, rhs_indices)
@@ -212,6 +221,9 @@ class RBFStencil:
         return np.vstack([(diff * self.phs_dr_over_r(r_rhs, sp.spline_degree)).T, bpoly])
 
     def bc_op(self, sp: StencilProperties, op: OpProperties, neu_coeff: float, dir_coeff: float, r_rhs: np.ndarray, x_subset: np.ndarray, x: np.ndarray, x_at_origin_subset: np.ndarray, x_at_origin: np.ndarray, nr_subset: np.ndarray) -> np.ndarray:
+        # Mixed boundary rows are assembled as a linear combination of normal
+        # derivative and interpolation rows. This keeps the row construction
+        # close to the mathematical boundary condition.
         total = np.zeros((self.n + self.npoly, x_at_origin_subset.shape[0]))
         if neu_coeff != 0:
             for d in range(self.s_dim):
@@ -230,6 +242,9 @@ class RBFStencil:
         return np.vstack([self.phs_rbf(r_rhs, sp.spline_degree).T, bpoly])
 
     def _compute_weights_interior(self, x: np.ndarray, sp: StencilProperties, op: OpProperties, apply_op: str | Callable[..., np.ndarray], rhs_indices: int | np.ndarray) -> np.ndarray:
+        # Build the operator right-hand side for the requested stencil rows and
+        # solve the augmented RBF system to recover the final differentiation
+        # weights.
         self.initialize_geometry(x, sp)
         rhs_inds = np.atleast_1d(rhs_indices).astype(int) - 1
         x_subset = x[rhs_inds]
@@ -310,6 +325,9 @@ class RBFStencil:
 
     @staticmethod
     def stable_solve(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        # Normal stencils should solve cleanly with a dense direct solve. The
+        # pseudo-inverse fallback keeps the port alive on nearly singular cases
+        # that occasionally arise in tiny or pathological stencils.
         x = np.linalg.solve(a, b)
         if np.any(~np.isfinite(x)):
             x = np.linalg.pinv(a) @ b
@@ -336,6 +354,9 @@ class WeightedLeastSquaresStencil:
     bc: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
 
     def initialize_geometry(self, x: np.ndarray, sp: StencilProperties) -> None:
+        # The WLS backend fits the same polynomial space as the RBF backend but
+        # replaces the augmented interpolation solve with a weighted local least
+        # squares reconstruction matrix.
         self.s_dim = x.shape[1]
         self.n = x.shape[0]
         self.fit_ell = sp.ell
@@ -393,6 +414,8 @@ class WeightedLeastSquaresStencil:
         return self.basis.evaluate(x_at_origin_subset, np.zeros((1, self.s_dim), dtype=int), True).T
 
     def _compute_weights_interior(self, x: np.ndarray, sp: StencilProperties, op: OpProperties, apply_op: str | Callable[..., np.ndarray], rhs_indices: int | np.ndarray) -> np.ndarray:
+        # Apply the precomputed reconstructor to the polynomial target rows for
+        # the requested operator.
         self.initialize_geometry(x, sp)
         rhs_inds = np.atleast_1d(rhs_indices).astype(int) - 1
         x_subset = x[rhs_inds]
@@ -452,6 +475,9 @@ class FDDiffOp:
     recorded_stencil_globals: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
 
     def assemble_op(self, domain: DomainDescriptor, op_name: str, st_props: StencilProperties, op_props: OpProperties, *, neu_coeff: np.ndarray | None = None, dir_coeff: np.ndarray | None = None, active_rows: np.ndarray | None = None) -> None:
+        # Assemble one sparse operator row per requested center. Each row is
+        # built from a local stencil query, then scattered into global triplet
+        # form before converting to CSR.
         center_points, center_row_ids, center_col_globals, center_normals = _pick_centers(domain, st_props.point_set)
         if active_rows is None:
             active_rows = np.arange(1, center_points.shape[0] + 1)
@@ -520,6 +546,9 @@ class FDDiffOp:
 @dataclass
 class FDODiffOp(FDDiffOp):
     def assemble_op(self, domain: DomainDescriptor, op_name: str, st_props: StencilProperties, op_props: OpProperties, *, neu_coeff: np.ndarray | None = None, dir_coeff: np.ndarray | None = None, active_rows: np.ndarray | None = None) -> None:
+        # The overlapped assembler reuses one stencil to write several nearby
+        # rows, accepting only rows whose stability metrics do not exceed the
+        # center row's metrics.
         center_points, center_row_ids, center_col_globals, center_normals = _pick_centers(domain, st_props.point_set)
         stencil_points = domain.get_tree_points(st_props.tree_mode)
         stencil_globals = domain.get_tree_globals(st_props.tree_mode)
@@ -581,6 +610,8 @@ class FDODiffOp(FDDiffOp):
 
 
 def _assemble_one(approx_factory: Callable[[], object], domain: DomainDescriptor, center_points: np.ndarray, center_row_ids: np.ndarray, center_col_globals: np.ndarray, center_normals: np.ndarray | None, local_row: int, st_props: StencilProperties, op_props: OpProperties, op_name: str, use_boundary: bool, neu_coeff: np.ndarray | None, dir_coeff: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, object, np.ndarray, int, int]:
+    # Gather the local stencil for one row and delegate the actual weight
+    # construction to the selected approximation backend.
     center_point = center_points[local_row - 1]
     center_row_id = int(center_row_ids[local_row - 1])
     center_col_global = int(center_col_globals[local_row - 1])
@@ -598,6 +629,8 @@ def _assemble_one(approx_factory: Callable[[], object], domain: DomainDescriptor
 
 
 def _pick_centers(domain: DomainDescriptor, point_set: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    # Map the user-facing point-set choice onto the actual node arrays and
+    # global numbering used by the sparse operator assembly.
     normals = None
     mode = StencilProperties.normalize_point_set(point_set)
     if mode == "all":

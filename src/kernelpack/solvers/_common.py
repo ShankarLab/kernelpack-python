@@ -12,6 +12,9 @@ from kernelpack.rbffd import FDODiffOp, FDDiffOp, OpProperties, RBFStencil, Sten
 
 
 def build_stencil_properties(domain: DomainDescriptor, xi: int, theta: int, point_set: str) -> StencilProperties:
+    # The solver layer asks for target order `xi` and operator order `theta`;
+    # here we translate that request into a concrete stencil size and
+    # polynomial degree that the rbffd layer understands.
     dim = domain.get_dim()
     ell = max(xi + theta - 1, 2)
     sp = StencilProperties()
@@ -29,6 +32,8 @@ def build_stencil_properties(domain: DomainDescriptor, xi: int, theta: int, poin
 
 
 def resolve_stencil_factory(stencil_spec: str | Callable[[], object]) -> Callable[[], object]:
+    # Keep the solver-facing API string-based so examples stay concise, but
+    # normalize those strings into actual stencil constructors here.
     if callable(stencil_spec):
         return stencil_spec
     name = str(stencil_spec).lower()
@@ -50,6 +55,8 @@ def make_assembler(assembler_spec: str, stencil_spec: str | Callable[[], object]
 
 
 def evaluate_node_callback(func: Callable[..., np.ndarray] | np.ndarray | float, x: np.ndarray, label: str) -> np.ndarray:
+    # Accept either callbacks or already-materialized arrays/scalars and always
+    # return one value per node.
     values = func(x) if callable(func) else func
     values = np.asarray(values, dtype=float).reshape(-1)
     if values.size == 1:
@@ -80,6 +87,9 @@ def evaluate_boundary_values(
 
 
 def build_system_matrix(lap: sparse.spmatrix, bc: sparse.spmatrix, n_cols: int, pure_neumann: bool) -> sparse.csr_matrix:
+    # The stationary Poisson system is built by stacking interior equations and
+    # boundary rows. Pure-Neumann problems receive one extra nullspace-fixing
+    # row/column to remove the constant mode.
     system = sparse.vstack([-lap, bc], format="csr")
     if pure_neumann:
         ones_col = sparse.csr_matrix(np.ones((system.shape[0], 1)))
@@ -108,6 +118,8 @@ def build_initial_guess(
     rhs_boundary: np.ndarray,
     pure_neumann: bool,
 ) -> np.ndarray | None:
+    # Permit several convenient guess shapes so higher-level code can pass just
+    # the physical state or the full augmented state depending on what it has.
     guess = np.asarray(initial_guess, dtype=float).reshape(-1)
     if guess.size == 0:
         return None
@@ -127,6 +139,8 @@ def build_initial_guess(
 
 
 def gmres_with_fallback(system: sparse.spmatrix, rhs: np.ndarray, guess: np.ndarray) -> np.ndarray:
+    # Prefer GMRES when the caller supplied an initial guess, but fall back to a
+    # direct sparse solve if the Krylov iteration stalls or returns junk.
     sol, info = spla.gmres(system, rhs, x0=guess, rtol=1e-10, atol=0.0, restart=None, maxiter=200)
     if info != 0 or np.any(~np.isfinite(sol)):
         sol = spla.spsolve(system, rhs)
@@ -178,6 +192,8 @@ def evaluate_forcing_callback(
     t: float,
     x: np.ndarray,
 ) -> np.ndarray:
+    # Time-dependent forcing callbacks in the examples use a few different
+    # signatures; this adapter keeps the solver tolerant of those variations.
     if callable(func):
         try:
             values = func(nu, t, x)
@@ -219,6 +235,8 @@ def evaluate_transient_boundary_values(
 
 
 def build_implicit_system(lap: sparse.csr_matrix, bc: sparse.csr_matrix, n_physical: int, lap_scale: float) -> sparse.csr_matrix:
+    # For diffusion-style implicit steps, add the identity contribution only on
+    # the physical rows and then append boundary rows underneath.
     system = lap_scale * lap
     system = system.tolil()
     system[:n_physical, :n_physical] = system[:n_physical, :n_physical] + sparse.eye(n_physical, format="lil")

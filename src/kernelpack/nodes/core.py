@@ -24,6 +24,9 @@ def generate_poisson_nodes_in_box(
     boundary_refinement_fraction: float = 1.0,
     boundary_distance: float = 0.0,
 ) -> tuple[np.ndarray, dict[str, object]]:
+    # Public entry point for the Matlab-style Poisson sampler. The sampler can
+    # run in fixed-radius or variable-radius mode, and can optionally shrink
+    # the local target radius in a boundary band.
     x_min = np.asarray(x_min, dtype=float).reshape(-1)
     x_max = np.asarray(x_max, dtype=float).reshape(-1)
     dim = x_min.size
@@ -89,6 +92,9 @@ def _parse_poisson_options(
     boundary_refinement_fraction: float,
     boundary_distance: float,
 ) -> dict[str, object]:
+    # Normalize the mixed sampler API into one options dictionary so the strip
+    # sampler can stay agnostic to whether the user requested fixed or variable
+    # radii, deterministic or random seeding, and optional boundary refinement.
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
     if x_min.size != x_max.size:
@@ -197,6 +203,8 @@ def _default_strip_count(use_parallel: bool, deterministic: bool, requested_stri
 
 
 def _build_strip_boxes(x_min: np.ndarray, x_max: np.ndarray, split_tol: float, strip_count: int) -> list[dict[str, np.ndarray]]:
+    # Split the box along the first coordinate using the same slightly shrunken
+    # strip extent as Matlab. Deterministic runs collapse to one strip.
     dim0 = (x_max[0] - x_min[0]) / strip_count
     out = []
     for k in range(strip_count):
@@ -214,6 +222,8 @@ def _poisson_strip_sample(
     opts: dict[str, object],
     seed: int,
 ) -> np.ndarray:
+    # Bridson-style dart throwing on one strip, with a local radius determined
+    # on the fly from the active point and the configured refinement mode.
     if np.any(sample_max <= sample_min):
         return np.zeros((0, sample_min.size))
 
@@ -305,6 +315,9 @@ def _has_conflicting_neighbor(
     grid_size: np.ndarray,
     opts: dict[str, object],
 ) -> bool:
+    # Neighbor rejection rules differ slightly between the plain and
+    # boundary-refined modes. The refined fixed-radius mode checks a symmetric
+    # pairwise threshold to preserve the near-boundary radius reduction.
     candidate_radius = _local_radius(point, opts)
     mode = str(opts["mode"])
     if mode == "fixed_radius_with_boundary_refinement":
@@ -373,6 +386,9 @@ def clip_points_by_geometry(
     chunk_size: int = 5000,
     min_parallel_points: int = 20000,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Filter a raw node cloud against the level set of a geometry object. This
+    # is the point where the box Poisson cloud becomes a geometry-conforming
+    # interior or exterior point set.
     del use_parallel, chunk_size, min_parallel_points
     x = np.asarray(x, dtype=float)
     level_set = _ensure_geometry_level_set(geometry, auto_build_level_set)
@@ -468,6 +484,9 @@ class DomainNodeGenerator:
         outer_refinement_zone_size_as_multiple_of_h: float = 2.0,
         **kwargs: object,
     ) -> None:
+        # Build boundary data first so the box sampler can optionally use those
+        # points to drive near-boundary refinement, then clip the raw cloud
+        # against the level set.
         xb, nrmls, level_set = _build_boundary_state(geometry)
         x_min, x_max = bounding_box_extents(geometry, True)
         sampler_input = radius if radius_function is None else radius_function
@@ -511,6 +530,9 @@ class DomainNodeGenerator:
         return x, mask, phi
 
     def build_domain_descriptor_from_geometry(self, geometry: object, radius: float, **kwargs: object) -> DomainDescriptor:
+        # Promote the generated interior cloud into the full descriptor used by
+        # the solver/assembly layers by adding boundary and ghost nodes plus the
+        # relevant level-set metadata.
         self.generate_interior_nodes_from_geometry(geometry, radius, **kwargs)
         xb, nrmls, level_set = _build_boundary_state(geometry)
         xg = xb + 0.5 * radius * nrmls

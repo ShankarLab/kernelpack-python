@@ -44,6 +44,9 @@ class PoissonSolver:
     last_solve_used_nullspace_: bool = False
 
     def init(self, domain: DomainDescriptor, xi: int, num_omp_threads: int = 1) -> None:
+        # Cache the domain geometry and assemble the interior Laplacian once.
+        # Boundary rows depend on the coefficient callbacks, so those are built
+        # per solve instead.
         self.domain = domain
         self.xi = xi
         self.num_omp_threads = num_omp_threads
@@ -72,6 +75,9 @@ class PoissonSolver:
         bc: Callable[..., np.ndarray] | np.ndarray,
         initial_guess: np.ndarray | None = None,
     ) -> dict[str, object]:
+        # Materialize the boundary coefficients first because they determine
+        # both the boundary operator rows and whether the problem is pure
+        # Neumann, which changes the final linear system shape.
         if initial_guess is None:
             initial_guess = np.zeros(0)
         neu_coeff = evaluate_node_callback(neu_coeff_func, self.xb, "boundary coefficient")
@@ -90,6 +96,8 @@ class PoissonSolver:
         rhs_boundary = evaluate_boundary_values(bc, neu_coeff, dir_coeff, self.nr, self.xb)
         pure_neumann = np.max(np.abs(dir_coeff)) <= 1e-13
         self.last_solve_used_nullspace_ = pure_neumann
+        # Build the final sparse system and solve it in the augmented form used
+        # internally by the solver helpers.
         system = build_system_matrix(self.lap, self.bc, self.nf, pure_neumann)
         rhs = build_system_rhs(rhs_target, rhs_boundary, pure_neumann)
         guess = build_initial_guess(initial_guess, self.n, self.nf, rhs_boundary, pure_neumann)
