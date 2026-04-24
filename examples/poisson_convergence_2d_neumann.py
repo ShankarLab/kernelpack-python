@@ -21,20 +21,18 @@ class ConvergenceRow:
 
 
 def exact_solution(x: np.ndarray) -> np.ndarray:
-    r2 = x[:, 0] ** 2 + x[:, 1] ** 2
-    return r2**2 - r2 + (1.0 / 6.0)
+    return np.exp(x[:, 0] + x[:, 1])
 
 
 def forcing_values(x: np.ndarray) -> np.ndarray:
-    r2 = x[:, 0] ** 2 + x[:, 1] ** 2
-    return 4.0 - 16.0 * r2
+    return -2.0 * np.exp(x[:, 0] + x[:, 1])
 
 
 def boundary_flux(xb: np.ndarray, nr: np.ndarray) -> np.ndarray:
     grad = np.column_stack(
         [
-            4.0 * xb[:, 0] * (xb[:, 0] ** 2 + xb[:, 1] ** 2) - 2.0 * xb[:, 0],
-            4.0 * xb[:, 1] * (xb[:, 0] ** 2 + xb[:, 1] ** 2) - 2.0 * xb[:, 1],
+            np.exp(xb[:, 0] + xb[:, 1]),
+            np.exp(xb[:, 0] + xb[:, 1]),
         ]
     )
     return np.sum(grad * nr, axis=1)
@@ -79,7 +77,7 @@ def estimate_rates(rows: list[list[ConvergenceRow]]) -> list[dict[str, object]]:
 def print_results(rows: list[list[ConvergenceRow]], rates: list[dict[str, object]], backend: str, assembler: str) -> None:
     print()
     print(f"2D Poisson pure-Neumann convergence study ({backend.upper()}, {assembler.upper()})")
-    print("Exact solution: u(x,y) = r^4 - r^2 + 1/6 (mean-aligned before error)")
+    print("Exact solution: u(x,y) = exp(x + y) (mean-aligned before error)")
     print()
     for order_rows, rate_row in zip(rows, rates, strict=True):
         print(f"Order {order_rows[0].order}")
