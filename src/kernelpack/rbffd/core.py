@@ -7,6 +7,7 @@ from typing import Callable
 import numpy as np
 from scipy import sparse
 
+from kernelpack._numba import phs_dr_over_r_matrix, phs_kernel_matrix, phs_lap_matrix
 from kernelpack.domain import DomainDescriptor
 from kernelpack.geometry import distance_matrix
 from kernelpack.poly import PolynomialBasis, total_degree_indices
@@ -301,26 +302,15 @@ class RBFStencil:
 
     @staticmethod
     def phs_rbf(r: np.ndarray, degree: int) -> np.ndarray:
-        return np.where((degree % 2 == 0) & (r > 0), r**degree * np.log(r + 2e-16), r**degree)
+        return phs_kernel_matrix(r, degree)
 
     @staticmethod
     def phs_dr_over_r(r: np.ndarray, degree: int) -> np.ndarray:
-        if degree % 2 == 0:
-            d = r ** (degree - 2) * (degree * np.log(r + 2e-16) + 1)
-        else:
-            d = degree * r ** (degree - 2)
-        d[~np.isfinite(d)] = 0.0
-        return d
+        return phs_dr_over_r_matrix(r, degree)
 
     @staticmethod
     def phs_lap(r: np.ndarray, degree: int, dim: int) -> np.ndarray:
-        if degree % 2 == 0:
-            logt = np.log(r + 2e-16)
-            l = r ** (degree - 2) * (dim + 2 * degree + degree**2 * logt - 2 * degree * logt + dim * degree * logt - 2)
-        else:
-            l = degree * (dim + degree - 2) * r ** (degree - 2)
-        l[~np.isfinite(l)] = 0.0
-        return l
+        return phs_lap_matrix(r, degree, dim)
 
     @staticmethod
     def stable_solve(a: np.ndarray, b: np.ndarray) -> np.ndarray:

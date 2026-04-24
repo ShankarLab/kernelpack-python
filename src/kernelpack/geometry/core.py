@@ -6,14 +6,11 @@ from itertools import product
 import numpy as np
 from scipy.spatial import Delaunay, cKDTree
 
+from kernelpack._numba import dense_distance_matrix, phs_kernel_matrix
+
 
 def distance_matrix(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    x_sq = np.sum(x * x, axis=1, keepdims=True)
-    y_sq = np.sum(y * y, axis=1, keepdims=True).T
-    sq_dist = np.maximum(x_sq + y_sq - 2.0 * (x @ y.T), 0.0)
-    return np.sqrt(sq_dist)
+    return dense_distance_matrix(x, y)
 
 
 def normalize_rows(x: np.ndarray) -> np.ndarray:
@@ -24,10 +21,7 @@ def normalize_rows(x: np.ndarray) -> np.ndarray:
 
 
 def phs_kernel(r: np.ndarray, degree: int) -> np.ndarray:
-    r = np.asarray(r, dtype=float)
-    if degree % 2 == 0:
-        return np.where(r > 0, r**degree * np.log(r + 2e-16), 0.0)
-    return r**degree
+    return phs_kernel_matrix(r, degree)
 
 
 def wrap_periodic_parameter(t: np.ndarray) -> np.ndarray:
