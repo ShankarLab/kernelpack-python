@@ -144,6 +144,7 @@ class RBFStencil:
     solve_lhs: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
     coeffs: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
     x_stencil: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
+    r_stencil: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
     xc: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))
     xm: np.ndarray = field(default_factory=lambda: np.zeros(0))
     width: float = 1.0
@@ -170,14 +171,14 @@ class RBFStencil:
         self.x_stencil = x
         self.ell = sp.ell
         self.npoly = sp.npoly
-        r = distance_matrix(x, x)
-        self.width = max(float(r.max(initial=0.0)), 1.0)
+        self.r_stencil = distance_matrix(x, x)
+        self.width = max(float(self.r_stencil.max(initial=0.0)), 1.0)
         self.xm = x.mean(axis=0)
         self.xc = (x - self.xm) / self.width
         self.basis = PolynomialBasis.from_total_degree(self.s_dim, self.ell, family="legendre", center=np.zeros(self.s_dim), scale=1.0)
         p = self.basis.evaluate(self.xc, np.zeros((1, self.s_dim), dtype=int), True)
         self.a = np.zeros((self.n + self.npoly, self.n + self.npoly))
-        self.a[: self.n, : self.n] = self.phs_rbf(r, sp.spline_degree)
+        self.a[: self.n, : self.n] = self.phs_rbf(self.r_stencil, sp.spline_degree)
         self.a[: self.n, self.n :] = p
         self.a[self.n :, : self.n] = p.T
         self.solve_lhs = self.a
@@ -249,8 +250,7 @@ class RBFStencil:
         rhs_inds = np.atleast_1d(rhs_indices).astype(int) - 1
         x_subset = x[rhs_inds]
         x_at_origin_subset = self.xc[rhs_inds]
-        r = distance_matrix(x, x)
-        r_rhs = r[rhs_inds]
+        r_rhs = self.r_stencil[rhs_inds]
         b = self._apply_operator(apply_op, sp, op, r_rhs, x_subset, x, x_at_origin_subset, self.xc)
         if op.nosolve:
             w = b
@@ -272,8 +272,7 @@ class RBFStencil:
         x_subset = x[rhs_inds]
         x_at_origin_subset = self.xc[rhs_inds]
         nr_subset = nr[rhs_inds]
-        r = distance_matrix(x, x)
-        r_rhs = r[rhs_inds]
+        r_rhs = self.r_stencil[rhs_inds]
         b = self._apply_boundary_operator(apply_op, sp, op, neu_coeff, dir_coeff, r_rhs, x_subset, x, x_at_origin_subset, self.xc, nr_subset)
         w = self.stable_solve(self.solve_lhs, b)[: self.n]
         if rhs_inds.size == 1 and rhs_inds[0] == 0:
@@ -482,6 +481,7 @@ class FDDiffOp:
         if active_rows is None:
             active_rows = np.arange(1, center_points.shape[0] + 1)
         active_rows = np.asarray(active_rows, dtype=int)
+        stencil_points = domain.get_tree_points(st_props.tree_mode)
         stencil_globals = domain.get_tree_globals(st_props.tree_mode)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
@@ -496,6 +496,7 @@ class FDDiffOp:
             indices, w, stencil, center_point, row_id, global_id = _assemble_one(
                 self.approx_factory,
                 domain,
+                stencil_points,
                 center_points,
                 center_row_ids,
                 center_col_globals,
@@ -567,7 +568,7 @@ class FDODiffOp(FDDiffOp):
         cursor = 0
         self.stencils = []
         self.recorded_stencil_centers = []
-        self.recorded_stencil_globals = np.zeros(0, dtype=int)
+        recorded_globals: list[int] = []
         while np.any(active_set):
             local_center = int(np.flatnonzero(active_set)[0])
             center_point = center_points[local_center]
@@ -602,14 +603,30 @@ class FDODiffOp(FDDiffOp):
             if not accepted_any:
                 raise RuntimeError("current overlapped stencil could not accept any active row")
             self.recorded_stencil_centers.append(center_point)
-            self.recorded_stencil_globals = np.append(self.recorded_stencil_globals, center_col_globals[local_center])
+            recorded_globals.append(int(center_col_globals[local_center]))
             if op_props.record_stencils:
                 self.stencils.append({"Approx": stencil, "Indices": stencil_globals[indices - 1]})
         self.locations = triplet_locations[:cursor]
         self.values = triplet_values[:cursor]
+        self.recorded_stencil_globals = np.asarray(recorded_globals, dtype=int)
 
 
-def _assemble_one(approx_factory: Callable[[], object], domain: DomainDescriptor, center_points: np.ndarray, center_row_ids: np.ndarray, center_col_globals: np.ndarray, center_normals: np.ndarray | None, local_row: int, st_props: StencilProperties, op_props: OpProperties, op_name: str, use_boundary: bool, neu_coeff: np.ndarray | None, dir_coeff: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, object, np.ndarray, int, int]:
+def _assemble_one(
+    approx_factory: Callable[[], object],
+    domain: DomainDescriptor,
+    stencil_points: np.ndarray,
+    center_points: np.ndarray,
+    center_row_ids: np.ndarray,
+    center_col_globals: np.ndarray,
+    center_normals: np.ndarray | None,
+    local_row: int,
+    st_props: StencilProperties,
+    op_props: OpProperties,
+    op_name: str,
+    use_boundary: bool,
+    neu_coeff: np.ndarray | None,
+    dir_coeff: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, object, np.ndarray, int, int]:
     # Gather the local stencil for one row and delegate the actual weight
     # construction to the selected approximation backend.
     center_point = center_points[local_row - 1]
@@ -617,7 +634,6 @@ def _assemble_one(approx_factory: Callable[[], object], domain: DomainDescriptor
     center_col_global = int(center_col_globals[local_row - 1])
     indices, _ = domain.query_knn(st_props.tree_mode, center_point, st_props.n)
     indices = indices[0] + 1
-    stencil_points = domain.get_tree_points(st_props.tree_mode)
     loc_x = stencil_points[indices - 1]
     stencil = approx_factory()
     if use_boundary:
