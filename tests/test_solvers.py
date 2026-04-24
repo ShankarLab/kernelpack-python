@@ -60,6 +60,49 @@ def test_poisson_solver_checks():
     assert zero_neu_solver.last_solve_used_nullspace()
 
 
+def test_variable_poisson_solver_checks():
+    domain = build_test_domain()
+    u_exact = lambda x: x[:, 0] ** 2 + x[:, 1] ** 2
+    a_coeff = lambda x: 2 + x[:, 0] + 0.2 * x[:, 1]
+    forcing = lambda x: -(4 * a_coeff(x) + 2 * x[:, 0] + 0.4 * x[:, 1])
+    u_true = u_exact(domain.get_int_bdry_nodes())
+
+    wls_solver = solvers.VariablePoissonSolver(lap_assembler="fd", bc_assembler="fd", lap_stencil="wls", bc_stencil="wls")
+    wls_solver.init(domain, 3)
+    wls_result = wls_solver.solve(
+        forcing,
+        a_coeff,
+        lambda xb: np.zeros(xb.shape[0]),
+        lambda xb: np.ones(xb.shape[0]),
+        lambda neu_coeffs, dir_coeffs, nr, xb: u_exact(xb),
+    )
+    assert np.max(np.abs(wls_result["u"] - u_true)) < 4e-1
+
+    rbf_solver = solvers.VariablePoissonSolver(lap_assembler="fd", bc_assembler="fd", lap_stencil="rbf", bc_stencil="rbf")
+    rbf_solver.init(domain, 3)
+    rbf_result = rbf_solver.solve(
+        forcing,
+        a_coeff,
+        lambda xb: np.zeros(xb.shape[0]),
+        lambda xb: np.ones(xb.shape[0]),
+        lambda neu_coeffs, dir_coeffs, nr, xb: u_exact(xb),
+    )
+    assert np.max(np.abs(rbf_result["u"] - u_true)) < 6e-1
+    assert rbf_result["PDE"].shape[0] == domain.get_num_int_bdry_nodes()
+
+    zero_neu_solver = solvers.VariablePoissonSolver(lap_assembler="fd", bc_assembler="fd", lap_stencil="wls", bc_stencil="wls")
+    zero_neu_solver.init(domain, 3)
+    zero_neu_result = zero_neu_solver.solve(
+        lambda xeq: np.zeros(xeq.shape[0]),
+        lambda xeq: np.ones(xeq.shape[0]),
+        lambda xb: np.ones(xb.shape[0]),
+        lambda xb: np.zeros(xb.shape[0]),
+        lambda neu_coeffs, dir_coeffs, nr, xb: np.zeros(xb.shape[0]),
+    )
+    assert zero_neu_result["used_nullspace_augmentation"]
+    assert np.max(np.abs(zero_neu_result["u"])) < 1e-8
+
+
 def test_diffusion_solver_checks():
     domain = build_test_domain()
     nu = 0.25
