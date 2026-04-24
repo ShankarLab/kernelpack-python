@@ -10,8 +10,10 @@ from scipy.spatial import Delaunay, cKDTree
 def distance_matrix(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    diff = x[:, None, :] - y[None, :, :]
-    return np.linalg.norm(diff, axis=2)
+    x_sq = np.sum(x * x, axis=1, keepdims=True)
+    y_sq = np.sum(y * y, axis=1, keepdims=True).T
+    sq_dist = np.maximum(x_sq + y_sq - 2.0 * (x @ y.T), 0.0)
+    return np.sqrt(sq_dist)
 
 
 def normalize_rows(x: np.ndarray) -> np.ndarray:
@@ -152,18 +154,12 @@ def resample_closed_curve_by_arc_length(curve: np.ndarray, target_count: int) ->
 
     cum_len = np.concatenate([[0.0], np.cumsum(seg_lens)])
     targets = np.arange(target_count, dtype=float) * (total / target_count)
-    inds = np.zeros(target_count, dtype=np.uint32)
-    for k, target in enumerate(targets):
-        idx = int(np.searchsorted(cum_len, target, side="right") - 1)
-        idx = min(max(idx, 0), n - 1)
-        next_idx = (idx + 1) % n
-        if idx < n - 1:
-            if abs(cum_len[idx + 1] - target) < abs(cum_len[idx] - target):
-                idx += 1
-        else:
-            if abs(total - target) < abs(cum_len[idx] - target):
-                idx = next_idx
-        inds[k] = np.uint32(idx)
+    inds = np.searchsorted(cum_len, targets, side="right") - 1
+    inds = np.clip(inds, 0, n - 1)
+    next_inds = (inds + 1) % n
+    current_dist = np.abs(cum_len[inds] - targets)
+    next_dist = np.where(inds < n - 1, np.abs(cum_len[inds + 1] - targets), np.abs(total - targets))
+    inds = np.where(next_dist < current_dist, next_inds, inds).astype(np.uint32)
     return np.unique(inds)
 
 

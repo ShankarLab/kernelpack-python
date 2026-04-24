@@ -371,13 +371,11 @@ class WeightedLeastSquaresStencil:
         sqrtw = np.sqrt(self.node_weights)
         weighted_p = p * sqrtw[:, None]
         weighted_identity = np.diag(sqrtw)
-        gram = weighted_p.T @ weighted_p
-        if np.linalg.matrix_rank(weighted_p) < self.fit_npoly or np.linalg.cond(gram) > 1e12:
+        self.reconstructor = np.linalg.lstsq(weighted_p, weighted_identity, rcond=None)[0]
+        if np.any(~np.isfinite(self.reconstructor)):
             self.reconstructor = np.linalg.pinv(weighted_p) @ weighted_identity
-        else:
-            self.reconstructor = np.linalg.lstsq(weighted_p, weighted_identity, rcond=None)[0]
         self.reconstructor[~np.isfinite(self.reconstructor)] = 0.0
-        self.interp_metric = gram
+        self.interp_metric = weighted_p.T @ weighted_p
 
     def compute_weights(self, x: np.ndarray, *args: object) -> np.ndarray:
         if len(args) >= 7 and isinstance(args[0], np.ndarray) and args[0].shape[1] == x.shape[1]:
@@ -483,6 +481,7 @@ class FDDiffOp:
         active_rows = np.asarray(active_rows, dtype=int)
         stencil_points = domain.get_tree_points(st_props.tree_mode)
         stencil_globals = domain.get_tree_globals(st_props.tree_mode)
+        knn_indices = _query_center_stencils(domain, st_props.tree_mode, center_points, st_props.n)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
         all_indices = []
@@ -495,8 +494,8 @@ class FDDiffOp:
         for k, local_row in enumerate(active_rows):
             indices, w, stencil, center_point, row_id, global_id = _assemble_one(
                 self.approx_factory,
-                domain,
                 stencil_points,
+                knn_indices[int(local_row) - 1],
                 center_points,
                 center_row_ids,
                 center_col_globals,
@@ -526,10 +525,11 @@ class FDDiffOp:
             cols = all_indices[k]
             w = all_weights[k]
             row_global = row_ids[k]
-            for j in range(st_props.n):
-                self.locations[cursor] = [row_global, stencil_globals[cols[j] - 1]]
-                self.values[cursor] = w[j, 0]
-                cursor += 1
+            next_cursor = cursor + cols.size
+            self.locations[cursor:next_cursor, 0] = row_global
+            self.locations[cursor:next_cursor, 1] = stencil_globals[cols - 1]
+            self.values[cursor:next_cursor] = w[: cols.size, 0]
+            cursor = next_cursor
             self.recorded_stencil_centers.append(centers_recorded[k])
             if op_props.record_stencils:
                 self.stencils.append({"Approx": all_stencils[k], "Indices": stencil_globals[cols - 1]})
@@ -561,6 +561,7 @@ class FDODiffOp(FDDiffOp):
         use_boundary = neu_coeff is not None or dir_coeff is not None
         loc_lim = max(1, int(np.floor(op_props.overlap_load * st_props.n)))
         row_to_local = {int(center_col_globals[k]): k for k in range(center_points.shape[0])}
+        knn_indices = _query_center_stencils(domain, st_props.tree_mode, center_points, st_props.n)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
         triplet_locations = np.zeros((active_rows.size * st_props.n, 2), dtype=int)
@@ -572,8 +573,7 @@ class FDODiffOp(FDDiffOp):
         while np.any(active_set):
             local_center = int(np.flatnonzero(active_set)[0])
             center_point = center_points[local_center]
-            indices, _ = domain.query_knn(st_props.tree_mode, center_point, st_props.n)
-            indices = indices[0] + 1
+            indices = knn_indices[local_center]
             rhs_indices = np.arange(1, min(loc_lim, indices.size) + 1)
             loc_x = stencil_points[indices - 1]
             stencil = self.approx_factory()
@@ -583,7 +583,8 @@ class FDODiffOp(FDDiffOp):
                 w = stencil.compute_weights(loc_x, st_props, op_props, op_name, rhs_indices)
             a = stencil.get_interp_mat()
             lebesgue = np.sum(np.abs(w[: st_props.n]), axis=0)
-            native = np.array([abs(w[:, j].T @ (a @ w[:, j])) for j in range(w.shape[1])])
+            aw = a @ w
+            native = np.abs(np.sum(w * aw, axis=0))
             leb0 = lebesgue[0]
             nat0 = native[0]
             accepted_any = False
@@ -594,10 +595,11 @@ class FDODiffOp(FDDiffOp):
                     continue
                 if lebesgue[j] > leb0 or native[j] > nat0:
                     continue
-                for q in range(st_props.n):
-                    triplet_locations[cursor] = [center_row_ids[candidate_local], stencil_globals[indices[q] - 1]]
-                    triplet_values[cursor] = w[q, j]
-                    cursor += 1
+                next_cursor = cursor + indices.size
+                triplet_locations[cursor:next_cursor, 0] = center_row_ids[candidate_local]
+                triplet_locations[cursor:next_cursor, 1] = stencil_globals[indices - 1]
+                triplet_values[cursor:next_cursor] = w[: indices.size, j]
+                cursor = next_cursor
                 active_set[candidate_local] = False
                 accepted_any = True
             if not accepted_any:
@@ -613,8 +615,8 @@ class FDODiffOp(FDDiffOp):
 
 def _assemble_one(
     approx_factory: Callable[[], object],
-    domain: DomainDescriptor,
     stencil_points: np.ndarray,
+    indices: np.ndarray,
     center_points: np.ndarray,
     center_row_ids: np.ndarray,
     center_col_globals: np.ndarray,
@@ -632,8 +634,6 @@ def _assemble_one(
     center_point = center_points[local_row - 1]
     center_row_id = int(center_row_ids[local_row - 1])
     center_col_global = int(center_col_globals[local_row - 1])
-    indices, _ = domain.query_knn(st_props.tree_mode, center_point, st_props.n)
-    indices = indices[0] + 1
     loc_x = stencil_points[indices - 1]
     stencil = approx_factory()
     if use_boundary:
@@ -642,6 +642,11 @@ def _assemble_one(
     else:
         w = stencil.compute_weights(loc_x, st_props, op_props, op_name, 1)
     return indices, w, stencil, center_point, center_row_id, center_col_global
+
+
+def _query_center_stencils(domain: DomainDescriptor, tree_mode: str, center_points: np.ndarray, stencil_size: int) -> np.ndarray:
+    indices, _ = domain.query_knn(tree_mode, center_points, stencil_size)
+    return np.asarray(indices, dtype=int) + 1
 
 
 def _pick_centers(domain: DomainDescriptor, point_set: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:

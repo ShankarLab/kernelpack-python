@@ -78,8 +78,8 @@ class DomainDescriptor:
             # Use the KD-tree when available: this is the hot path for stencil
             # construction, so we keep the fallback path only for completeness.
             distances, indices = tree.searcher.query(query_points, k=k)
-            indices = np.atleast_2d(indices)
-            distances = np.atleast_2d(distances)
+            indices = np.asarray(indices, dtype=int).reshape(query_points.shape[0], k)
+            distances = np.asarray(distances, dtype=float).reshape(query_points.shape[0], k)
             return indices, distances
         # Fallback for degenerate cases where we deliberately did not build a
         # searcher. This keeps the descriptor usable even with tiny point sets.
@@ -94,9 +94,16 @@ class DomainDescriptor:
         if points.size == 0:
             return [np.zeros(0, dtype=int) for _ in range(query_points.shape[0])], [np.zeros(0) for _ in range(query_points.shape[0])]
         if tree and tree.has_searcher and tree.searcher is not None:
-            idx = tree.searcher.query_ball_point(query_points, radius)
-            dists = [np.linalg.norm(points[i] - q, axis=1) if len(i) else np.zeros(0) for q, i in zip(query_points, idx)]
-            return [np.asarray(i, dtype=int) for i in idx], dists
+            raw_idx = tree.searcher.query_ball_point(query_points, radius)
+            indices = [np.asarray(i, dtype=int) for i in raw_idx]
+            distances = []
+            for q, idx in zip(query_points, indices):
+                if idx.size == 0:
+                    distances.append(np.zeros(0))
+                    continue
+                diff = points[idx] - q
+                distances.append(np.sqrt(np.sum(diff * diff, axis=1)))
+            return indices, distances
         d = distance_matrix(query_points, points)
         indices = []
         distances = []
