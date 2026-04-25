@@ -10,11 +10,13 @@ from scipy.sparse import linalg as spla
 from kernelpack.domain import DomainDescriptor
 from kernelpack.rbffd import OpProperties, StencilProperties
 from ._common import (
+    build_ilu_preconditioner,
     build_implicit_system,
     build_stencil_properties,
     evaluate_boundary_coefficient,
     evaluate_forcing_callback,
     evaluate_transient_boundary_values,
+    gmres_with_preconditioner,
     is_fixed_boundary_callback,
     make_assembler,
     validate_physical_state,
@@ -51,6 +53,9 @@ class DiffusionSolver:
     fixed_bc_coefficients_ready_: bool = False
     cached_neu_coeff_: np.ndarray = field(default_factory=lambda: np.zeros(0))
     cached_dir_coeff_: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    cached_implicit_system_: sparse.csr_matrix = field(default_factory=lambda: sparse.csr_matrix((0, 0)))
+    cached_implicit_preconditioner_: spla.LinearOperator | None = None
+    cached_implicit_lap_scale_: float = np.nan
 
     def init(self, domain: DomainDescriptor, xi: int, dlt: float, d_coeff: float, num_omp_threads: int = 1) -> None:
         # Assemble the time-independent Laplacian once up front. Boundary rows
@@ -84,11 +89,13 @@ class DiffusionSolver:
         self.fixed_bc_coefficients_ready_ = False
         self.cached_neu_coeff_ = np.zeros(0)
         self.cached_dir_coeff_ = np.zeros(0)
+        self._invalidate_implicit_solver()
 
     def set_step_size(self, dlt: float) -> None:
         self.dt = dlt
         self.fixed_bc_operator_ready_ = False
         self.fixed_bc_coefficients_ready_ = False
+        self._invalidate_implicit_solver()
 
     def set_initial_state(self, c0: np.ndarray) -> None:
         # BDF1 starts from a single physical state. We clear the higher-order
@@ -99,6 +106,7 @@ class DiffusionSolver:
         self.completed_steps_ = 0
         self.fixed_bc_operator_ready_ = False
         self.fixed_bc_coefficients_ready_ = False
+        self._invalidate_implicit_solver()
 
     def set_state_history(self, *states: np.ndarray) -> None:
         # Allow callers to bootstrap directly into BDF2/BDF3 by seeding one,
@@ -119,6 +127,7 @@ class DiffusionSolver:
             raise ValueError("set_state_history expects one, two, or three physical states")
         self.fixed_bc_operator_ready_ = False
         self.fixed_bc_coefficients_ready_ = False
+        self._invalidate_implicit_solver()
 
     def current_physical_state(self) -> np.ndarray:
         if self.completed_steps_ <= 0:
@@ -185,9 +194,10 @@ class DiffusionSolver:
         neu_coeff, dir_coeff = self._get_boundary_coefficients(t, neu_coeff_func, dir_coeff_func)
         self._ensure_boundary_operator(neu_coeff, dir_coeff)
         rhs_boundary = evaluate_transient_boundary_values(bc, neu_coeff, dir_coeff, self.nr, t, self.xb)
-        system = build_implicit_system(self.lap, self.bc, self.n, lap_scale)
+        system = self._ensure_implicit_solver(lap_scale)
         rhs = np.concatenate([rhs_physical.reshape(-1), rhs_boundary.reshape(-1)])
-        sol = spla.spsolve(system, rhs)
+        guess = np.concatenate([self.current_physical_state().reshape(-1), rhs_boundary.reshape(-1)])
+        sol = gmres_with_preconditioner(system, rhs, guess, self.cached_implicit_preconditioner_)
         next_state = np.asarray(sol[: self.n], dtype=float)
         self._push_completed_step(next_state)
         return self.current_physical_state()
@@ -224,8 +234,27 @@ class DiffusionSolver:
             dir_coeff=dir_coeff,
         )
         self.bc = bc_assembler.get_op().tocsr()
+        self._invalidate_implicit_solver()
         if self.fixed_bc_coefficients_ready_:
             self.fixed_bc_operator_ready_ = True
+
+    def _invalidate_implicit_solver(self) -> None:
+        self.cached_implicit_system_ = sparse.csr_matrix((0, 0))
+        self.cached_implicit_preconditioner_ = None
+        self.cached_implicit_lap_scale_ = np.nan
+
+    def _ensure_implicit_solver(self, lap_scale: float) -> sparse.csr_matrix:
+        if (
+            self.cached_implicit_system_.shape == (self.nf, self.nf)
+            and np.isfinite(self.cached_implicit_lap_scale_)
+            and self.cached_implicit_lap_scale_ == lap_scale
+        ):
+            return self.cached_implicit_system_
+        system = build_implicit_system(self.lap, self.bc, self.n, lap_scale)
+        self.cached_implicit_system_ = system
+        self.cached_implicit_preconditioner_ = build_ilu_preconditioner(system)
+        self.cached_implicit_lap_scale_ = float(lap_scale)
+        return system
 
     def _push_completed_step(self, next_state: np.ndarray) -> None:
         if self.completed_steps_ <= 0:

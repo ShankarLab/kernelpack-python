@@ -10,9 +10,11 @@ from scipy.sparse import linalg as spla
 from kernelpack.domain import DomainDescriptor
 from kernelpack.rbffd import OpProperties, StencilProperties
 from ._common import (
+    build_ilu_preconditioner,
     build_stencil_properties,
     evaluate_boundary_values,
     evaluate_node_callback,
+    gmres_with_preconditioner,
     make_assembler,
 )
 from .variable_poisson import build_variable_pde_operator, build_variable_system_matrix
@@ -44,25 +46,15 @@ def _gmres_step(
     preconditioner: sparse.csr_matrix,
     linear_tol: float,
 ) -> np.ndarray:
-    ilu_operator = None
-    try:
-        ilu = spla.spilu(preconditioner.tocsc())
-        ilu_operator = spla.LinearOperator(preconditioner.shape, ilu.solve)
-    except Exception:
-        ilu_operator = None
-
-    delta, info = spla.gmres(
+    ilu_operator = build_ilu_preconditioner(preconditioner)
+    return gmres_with_preconditioner(
         jacobian,
         rhs,
-        M=ilu_operator,
+        None,
+        ilu_operator,
         rtol=linear_tol,
-        atol=0.0,
-        restart=None,
         maxiter=max(jacobian.shape[0], 1),
     )
-    if info != 0 or np.any(~np.isfinite(delta)):
-        delta = spla.spsolve(jacobian, rhs)
-    return np.asarray(delta, dtype=float)
 
 
 @dataclass

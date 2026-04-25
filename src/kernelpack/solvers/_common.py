@@ -147,6 +147,35 @@ def gmres_with_fallback(system: sparse.spmatrix, rhs: np.ndarray, guess: np.ndar
     return np.asarray(sol, dtype=float)
 
 
+def build_ilu_preconditioner(system: sparse.spmatrix) -> spla.LinearOperator | None:
+    # Reuse ILU-preconditioned GMRES in the repeated implicit solves. If ILU
+    # fails on a particular sparse system, callers can still fall back to a
+    # direct sparse solve.
+    try:
+        system_csc = system.tocsc(copy=True)
+        system_csc.sort_indices()
+        ilu = spla.spilu(system_csc)
+        return spla.LinearOperator(system.shape, ilu.solve)
+    except Exception:
+        return None
+
+
+def gmres_with_preconditioner(
+    system: sparse.spmatrix,
+    rhs: np.ndarray,
+    guess: np.ndarray | None,
+    preconditioner: spla.LinearOperator | None,
+    *,
+    rtol: float = 1e-10,
+    maxiter: int = 200,
+) -> np.ndarray:
+    x0 = None if guess is None or np.asarray(guess).size == 0 else np.asarray(guess, dtype=float).reshape(-1)
+    sol, info = spla.gmres(system, rhs, x0=x0, M=preconditioner, rtol=rtol, atol=0.0, restart=None, maxiter=maxiter)
+    if info != 0 or np.any(~np.isfinite(sol)):
+        sol = spla.spsolve(system, rhs)
+    return np.asarray(sol, dtype=float)
+
+
 def validate_physical_state(state: np.ndarray, n: int) -> np.ndarray:
     state = np.asarray(state, dtype=float).reshape(-1)
     if state.size != n:
