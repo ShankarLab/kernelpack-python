@@ -31,7 +31,10 @@ interpretive implementation.
   `kernelpack.rbffd`
 - Numba-accelerated kernels for pairwise distances, PHS kernels, Legendre
   tensor-product evaluation, and stencil matrix setup
-- Fixed-domain `PoissonSolver` and `DiffusionSolver`
+- Elliptic, diffusion, and PU / PU-SL solver families in `kernelpack.solvers`,
+  including `PoissonSolver`, `VariablePoissonSolver`,
+  `NonlinearVariablePoissonSolver`, `DiffusionSolver`, `PUDiffusionSolver`,
+  and the current multispecies and advection-diffusion wrappers
 
 The main packages live in:
 
@@ -52,6 +55,9 @@ The main packages live in:
 - Standard and overlapped RBF-FD assembly
 - Fixed-domain Poisson solves
 - Fixed-domain diffusion stepping with BDF1, BDF2, and BDF3
+- Variable-coefficient and nonlinear variable-coefficient Poisson solves
+- PU diffusion and multispecies diffusion solves
+- PU-SL advection and PU-SL advection-diffusion / reaction stepping
 
 ## Status
 
@@ -63,7 +69,9 @@ typical KernelPack-style workflows:
 - polynomial bases and multi-index utilities
 - local RBF-FD and weighted least-squares stencils
 - sparse operator assembly
-- fixed-domain Poisson and diffusion solvers
+- fixed-domain, variable-coefficient, and nonlinear Poisson solvers
+- diffusion, PU diffusion, and multispecies diffusion solvers
+- PU-SL advection and advection-diffusion solver families
 - Numba-backed acceleration on the hottest geometry, polynomial, and stencil
   setup kernels
 
@@ -491,14 +499,27 @@ Current operator support includes:
 
 ### `kernelpack.solvers`
 
-This package contains the current fixed-domain solver layer:
+This package contains the current solver layer:
 
 - `PoissonSolver`
+- `VariablePoissonSolver`
+- `NonlinearVariablePoissonSolver`
 - `DiffusionSolver`
+- `MultiSpeciesDiffusionSolver`
+- `HeterogeneousMultiSpeciesDiffusionSolver`
+- `PUDiffusionSolver`
+- `MultiSpeciesPUDiffusionSolver`
+- `HeterogeneousMultiSpeciesPUDiffusionSolver`
+- `PUSLAdvectionSolver`
+- `MultiSpeciesPUSLAdvectionSolver`
+- `PUSLFDAdvectionDiffusionSolver`
+- `PUSLFDAdvectionDiffusionReactionSolver`
+- `PUSLPUAdvectionDiffusionSolver`
+- `PUSLPUAdvectionDiffusionReactionSolver`
 
-The solver layer is intentionally small and direct. It is built on top of the
-same `DomainDescriptor` and `rbffd` operator assembly path rather than
-introducing a separate abstraction stack.
+The solver layer stays intentionally direct. It is built on top of the same
+`DomainDescriptor` and `rbffd` operator assembly path rather than introducing a
+separate abstraction stack.
 
 ## Design notes
 
