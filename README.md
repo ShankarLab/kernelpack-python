@@ -520,30 +520,3 @@ This package contains the current solver layer:
 The solver layer stays intentionally direct. It is built on top of the same
 `DomainDescriptor` and `rbffd` operator assembly path rather than introducing a
 separate abstraction stack.
-
-## Design notes
-
-The port aims to preserve the Matlab project's logic while still feeling
-native in Python:
-
-- snake_case API names instead of Matlab camel case
-- dense local algebra through NumPy
-- sparse global solves through SciPy
-- nearest-neighbor structures through `scipy.spatial.cKDTree`
-- focused tests that mirror the Matlab checks
-
-The project direction is still to keep building outward from KernelPack-style
-contracts rather than inventing a separate abstraction hierarchy.
-
-## Notes
-
-- This is a Python implementation of the main KernelPack ingredients, not yet
-  a full one-to-one port of every C++ or Matlab path.
-- Pure Neumann Poisson problems are solved with the usual nullspace
-  augmentation, so comparisons should be made after aligning the constant.
-- The repo includes both `RBFStencil` and `WeightedLeastSquaresStencil`; the
-  weighted least-squares path reproduces low-order polynomial targets very
-  cleanly, while the RBF-FD path tracks the KernelPack-style stencil
-  formulation more directly.
-- The Python port is under active development, and the README will continue to
-  grow alongside new examples, solver workflows, and higher-level utilities.
