@@ -84,8 +84,8 @@ class StencilProperties:
                 raise ValueError(f"unknown approximation {approximation}")
         if spline_degree is None:
             spline_degree = max(2 * q + 1, 3)
-            if spline_degree % 2 == 0:
-                spline_degree += 1
+        if spline_degree % 2 == 0:
+            spline_degree -= 1
         n = max(npoly + 1, ceil(stencil_factor * npoly))
         return cls(n=n, dim=dimension, ell=ell, spline_degree=spline_degree, npoly=npoly, tree_mode=tree_mode, point_set=point_set)
 
