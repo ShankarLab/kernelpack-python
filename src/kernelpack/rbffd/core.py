@@ -580,7 +580,7 @@ class FDODiffOp(FDDiffOp):
         active_remaining = int(np.count_nonzero(active_set))
         use_boundary = neu_coeff is not None or dir_coeff is not None
         loc_lim = max(1, int(np.floor(op_props.overlap_load * st_props.n)))
-        row_to_local = _build_global_to_local_map(center_col_globals)
+        row_to_local = _build_global_to_local_map(center_col_globals, int(stencil_globals.max(initial=0)))
         knn_indices = _query_center_stencils(domain, st_props.tree_mode, center_points, st_props.n)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
@@ -599,7 +599,15 @@ class FDODiffOp(FDDiffOp):
             local_center = next_active
             center_point = center_points[local_center]
             indices = _promote_center_to_front(knn_indices[local_center], int(center_col_globals[local_center]), stencil_globals)
-            rhs_indices = np.arange(1, min(loc_lim, indices.size) + 1)
+            local_limit = min(loc_lim, indices.size)
+            candidate_globals = stencil_globals[indices[:local_limit] - 1]
+            candidate_locals = row_to_local[candidate_globals]
+            candidate_active = candidate_locals >= 0
+            if np.any(candidate_active):
+                candidate_active[candidate_active] &= active_set[candidate_locals[candidate_active]]
+            candidate_active[0] = True
+            rhs_positions = np.flatnonzero(candidate_active)
+            rhs_indices = rhs_positions + 1
             loc_x = stencil_points[indices - 1]
             stencil = self.approx_factory()
             if use_boundary:
@@ -613,17 +621,16 @@ class FDODiffOp(FDDiffOp):
             leb0 = lebesgue[0]
             nat0 = native[0]
             accepted_any = False
-            for j in range(min(loc_lim, indices.size)):
-                candidate_col_global = stencil_globals[indices[j] - 1]
-                candidate_local = _lookup_global_to_local(row_to_local, int(candidate_col_global))
+            for col_idx, j in enumerate(rhs_positions):
+                candidate_local = int(candidate_locals[j])
                 if candidate_local < 0 or not active_set[candidate_local]:
                     continue
-                if lebesgue[j] > leb0 or native[j] > nat0:
+                if lebesgue[col_idx] > leb0 or native[col_idx] > nat0:
                     continue
                 next_cursor = cursor + indices.size
                 triplet_locations[cursor:next_cursor, 0] = center_row_ids[candidate_local]
                 triplet_locations[cursor:next_cursor, 1] = stencil_globals[indices - 1]
-                triplet_values[cursor:next_cursor] = w[: indices.size, j]
+                triplet_values[cursor:next_cursor] = w[: indices.size, col_idx]
                 cursor = next_cursor
                 active_set[candidate_local] = False
                 active_remaining -= 1
@@ -677,16 +684,10 @@ def _query_center_stencils(domain: DomainDescriptor, tree_mode: str, center_poin
     return np.asarray(indices, dtype=int) + 1
 
 
-def _build_global_to_local_map(center_col_globals: np.ndarray) -> np.ndarray:
-    out = np.full(int(center_col_globals.max(initial=0)) + 1, -1, dtype=int)
+def _build_global_to_local_map(center_col_globals: np.ndarray, max_global: int) -> np.ndarray:
+    out = np.full(max(max_global, int(center_col_globals.max(initial=0))) + 1, -1, dtype=int)
     out[center_col_globals] = np.arange(center_col_globals.size, dtype=int)
     return out
-
-
-def _lookup_global_to_local(row_to_local: np.ndarray, candidate_col_global: int) -> int:
-    if candidate_col_global < 0 or candidate_col_global >= row_to_local.size:
-        return -1
-    return int(row_to_local[candidate_col_global])
 
 
 def _promote_center_to_front(indices: np.ndarray, center_col_global: int, stencil_globals: np.ndarray) -> np.ndarray:
