@@ -152,7 +152,7 @@ class OpProperties:
     store_weights: bool = True
     record_stencils: bool = False
     nosolve: bool = False
-    overlap_load: float = 0.5
+    overlap_load: float = 0.3
     use_parallel: bool = False
 
 

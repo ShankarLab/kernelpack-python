@@ -12,6 +12,10 @@ goal is to keep the same overall KernelPack-style workflow while leaning into
 Python strengths such as NumPy/SciPy vectorization, sparse linear algebra, and
 testable modular code.
 
+The current implementation also uses targeted Numba acceleration for several
+hot numerical kernels, so the Python port is not limited to a purely
+interpretive implementation.
+
 ## What it includes
 
 - Geometry objects for smooth and piecewise-smooth boundaries and surfaces:
@@ -25,6 +29,8 @@ testable modular code.
   `PolynomialBasis`
 - RBF-FD and weighted least-squares stencil and assembly classes in
   `kernelpack.rbffd`
+- Numba-accelerated kernels for pairwise distances, PHS kernels, Legendre
+  tensor-product evaluation, and stencil matrix setup
 - Fixed-domain `PoissonSolver` and `DiffusionSolver`
 
 The main packages live in:
@@ -58,6 +64,12 @@ typical KernelPack-style workflows:
 - local RBF-FD and weighted least-squares stencils
 - sparse operator assembly
 - fixed-domain Poisson and diffusion solvers
+- Numba-backed acceleration on the hottest geometry, polynomial, and stencil
+  setup kernels
+
+For overlapped RBF-FD, the current default overlap load is `0.3`. That has
+been a better speed/accuracy tradeoff than `0.5` on the representative 3D
+Poisson benchmarks used during optimization.
 
 The public API follows Python naming conventions, so Matlab-style methods such
 as `buildClosedGeometricModelPS` appear here as snake_case methods like
@@ -72,6 +84,12 @@ python -m venv .venv
 .venv\Scripts\activate
 python -m pip install -e .[dev]
 ```
+
+This installs the compiled-stack dependencies used by the package, including
+`numpy`, `scipy`, `matplotlib`, `pytest`, and `numba`.
+
+`numba` is used opportunistically. The accelerated kernels are part of the
+normal package path, and editable installs pick them up automatically.
 
 Run the test suite with:
 
@@ -193,6 +211,19 @@ op = OpProperties(record_stencils=True)
 
 # Assemble a Laplacian on the domain descriptor.
 assembler = FDDiffOp(lambda: RBFStencil())
+assembler.assemble_op(domain, "lap", sp, op)
+L = assembler.get_op()
+```
+
+For overlapped assembly, switch to `FDODiffOp`. The default overlap load in
+`OpProperties` is now `0.3`, which is a good starting point for larger 3D
+problems:
+
+```python
+from kernelpack.rbffd import FDODiffOp
+
+op = OpProperties(record_stencils=True)  # overlap_load defaults to 0.3
+assembler = FDODiffOp(lambda: RBFStencil())
 assembler.assemble_op(domain, "lap", sp, op)
 L = assembler.get_op()
 ```
@@ -445,6 +476,11 @@ This package contains the local discretization and assembly layer:
 - `OpProperties`
 - `FDDiffOp`
 - `FDODiffOp`
+
+Implementation note:
+- Several low-level kernels in `geometry`, `poly`, and `rbffd` are accelerated
+  with Numba. Solver orchestration stays in ordinary Python, while repeated
+  numeric kernels are compiled where that pays off.
 
 Current operator support includes:
 
