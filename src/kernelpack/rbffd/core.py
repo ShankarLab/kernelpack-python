@@ -577,9 +577,10 @@ class FDODiffOp(FDDiffOp):
         active_rows = np.asarray(active_rows, dtype=int)
         active_set = np.zeros(center_points.shape[0], dtype=bool)
         active_set[active_rows - 1] = True
+        active_remaining = int(np.count_nonzero(active_set))
         use_boundary = neu_coeff is not None or dir_coeff is not None
         loc_lim = max(1, int(np.floor(op_props.overlap_load * st_props.n)))
-        row_to_local = {int(center_col_globals[k]): k for k in range(center_points.shape[0])}
+        row_to_local = _build_global_to_local_map(center_col_globals)
         knn_indices = _query_center_stencils(domain, st_props.tree_mode, center_points, st_props.n)
         self.n1 = int(center_row_ids.max(initial=0))
         self.n2 = int(stencil_globals.max(initial=0))
@@ -589,10 +590,15 @@ class FDODiffOp(FDDiffOp):
         self.stencils = []
         self.recorded_stencil_centers = []
         recorded_globals: list[int] = []
-        while np.any(active_set):
-            local_center = int(np.flatnonzero(active_set)[0])
+        next_active = int(active_rows.min(initial=1) - 1)
+        while active_remaining > 0:
+            while next_active < active_set.size and not active_set[next_active]:
+                next_active += 1
+            if next_active >= active_set.size:
+                raise RuntimeError("active row bookkeeping became inconsistent")
+            local_center = next_active
             center_point = center_points[local_center]
-            indices = knn_indices[local_center]
+            indices = _promote_center_to_front(knn_indices[local_center], int(center_col_globals[local_center]), stencil_globals)
             rhs_indices = np.arange(1, min(loc_lim, indices.size) + 1)
             loc_x = stencil_points[indices - 1]
             stencil = self.approx_factory()
@@ -609,8 +615,8 @@ class FDODiffOp(FDDiffOp):
             accepted_any = False
             for j in range(min(loc_lim, indices.size)):
                 candidate_col_global = stencil_globals[indices[j] - 1]
-                candidate_local = row_to_local.get(int(candidate_col_global))
-                if candidate_local is None or not active_set[candidate_local]:
+                candidate_local = _lookup_global_to_local(row_to_local, int(candidate_col_global))
+                if candidate_local < 0 or not active_set[candidate_local]:
                     continue
                 if lebesgue[j] > leb0 or native[j] > nat0:
                     continue
@@ -620,6 +626,9 @@ class FDODiffOp(FDDiffOp):
                 triplet_values[cursor:next_cursor] = w[: indices.size, j]
                 cursor = next_cursor
                 active_set[candidate_local] = False
+                active_remaining -= 1
+                if candidate_local < next_active:
+                    next_active = candidate_local
                 accepted_any = True
             if not accepted_any:
                 raise RuntimeError("current overlapped stencil could not accept any active row")
@@ -666,6 +675,32 @@ def _assemble_one(
 def _query_center_stencils(domain: DomainDescriptor, tree_mode: str, center_points: np.ndarray, stencil_size: int) -> np.ndarray:
     indices, _ = domain.query_knn(tree_mode, center_points, stencil_size)
     return np.asarray(indices, dtype=int) + 1
+
+
+def _build_global_to_local_map(center_col_globals: np.ndarray) -> np.ndarray:
+    out = np.full(int(center_col_globals.max(initial=0)) + 1, -1, dtype=int)
+    out[center_col_globals] = np.arange(center_col_globals.size, dtype=int)
+    return out
+
+
+def _lookup_global_to_local(row_to_local: np.ndarray, candidate_col_global: int) -> int:
+    if candidate_col_global < 0 or candidate_col_global >= row_to_local.size:
+        return -1
+    return int(row_to_local[candidate_col_global])
+
+
+def _promote_center_to_front(indices: np.ndarray, center_col_global: int, stencil_globals: np.ndarray) -> np.ndarray:
+    if indices.size == 0:
+        return indices
+    center_matches = np.flatnonzero(stencil_globals[indices - 1] == center_col_global)
+    if center_matches.size == 0:
+        raise RuntimeError("overlapped stencil center is not present in its own neighbor list")
+    center_pos = int(center_matches[0])
+    if center_pos == 0:
+        return indices
+    out = indices.copy()
+    out[0], out[center_pos] = out[center_pos], out[0]
+    return out
 
 
 def _pick_centers(domain: DomainDescriptor, point_set: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:

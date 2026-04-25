@@ -60,6 +60,30 @@ def test_rbffd_laplacian():
     assert np.all(np.abs(lap[active_rows - 1] - 4) < 1e-8)
 
 
+def test_fdodiffop_center_is_explicit_and_matches_fd_on_quadratic():
+    xg, yg = np.meshgrid(np.linspace(-1, 1, 5), np.linspace(-1, 1, 5), indexing="ij")
+    x = np.column_stack([xg.ravel(), yg.ravel()])
+    interior_mask = (np.abs(x[:, 0]) < 0.999) & (np.abs(x[:, 1]) < 0.999)
+    active_rows = np.flatnonzero(interior_mask) + 1
+    dd = domain.DomainDescriptor()
+    dd.set_nodes(x, np.zeros((0, 2)), np.zeros((0, 2)))
+    dd.set_sep_rad(0.5)
+    dd.build_structs()
+    sp = rbffd.StencilProperties(n=9, dim=2, ell=2, spline_degree=3, tree_mode="interior_boundary", point_set="interior_boundary")
+    op = rbffd.OpProperties(overlap_load=0.5)
+    f = x[:, 0] ** 2 + x[:, 1] ** 2
+
+    fd = rbffd.FDDiffOp()
+    fd.assemble_op(dd, "lap", sp, op, active_rows=active_rows)
+    fdo = rbffd.FDODiffOp()
+    fdo.assemble_op(dd, "lap", sp, op, active_rows=active_rows)
+
+    lap_fd = fd.get_op() @ f
+    lap_fdo = fdo.get_op() @ f
+    assert np.all(np.abs(lap_fdo[active_rows - 1] - 4) < 1e-7)
+    assert np.all(np.abs(lap_fdo[active_rows - 1] - lap_fd[active_rows - 1]) < 1e-7)
+
+
 def test_legendre_basis_numba_path_matches_reference():
     x = np.array([[0.1, -0.2], [0.4, 0.3], [-0.25, 0.5]])
     basis = poly.PolynomialBasis.from_total_degree(2, 3, family="legendre")
