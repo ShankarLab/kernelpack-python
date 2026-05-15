@@ -290,3 +290,89 @@ def build_augmented_rbf_lhs(kernel: np.ndarray, poly: np.ndarray) -> np.ndarray:
     out[:n, n:] = poly
     out[n:, :n] = poly.T
     return out
+
+
+if NUMBA_AVAILABLE:
+
+    @njit(cache=True, fastmath=True)
+    def _divfree_gram_matrix_numba(x: np.ndarray, y: np.ndarray, degree: int) -> np.ndarray:
+        dim = x.shape[1]
+        nx = x.shape[0]
+        ny = y.shape[0]
+        eps = np.finfo(np.float64).eps
+        out = np.empty((dim * nx, dim * ny), dtype=np.float64)
+        for i in range(nx):
+            for j in range(ny):
+                diff0 = x[i, 0] - y[j, 0]
+                diff1 = x[i, 1] - y[j, 1]
+                r2 = diff0 * diff0 + diff1 * diff1
+                diff2 = 0.0
+                if dim == 3:
+                    diff2 = x[i, 2] - y[j, 2]
+                    r2 += diff2 * diff2
+                re = np.sqrt(r2) + eps
+                re_m2 = re ** (degree - 2)
+                cross_coeff = degree * (degree - 2) * (re ** (degree - 4))
+                full_diag = -degree * (degree + dim - 2) * re_m2
+                if dim == 2:
+                    value00 = cross_coeff * diff0 * diff0 + degree * re_m2 + full_diag
+                    value01 = cross_coeff * diff0 * diff1
+                    value10 = value01
+                    value11 = cross_coeff * diff1 * diff1 + degree * re_m2 + full_diag
+                    out[i, j] = value00
+                    out[i, ny + j] = value01
+                    out[nx + i, j] = value10
+                    out[nx + i, ny + j] = value11
+                else:
+                    value00 = cross_coeff * diff0 * diff0 + degree * re_m2 + full_diag
+                    value01 = cross_coeff * diff0 * diff1
+                    value02 = cross_coeff * diff0 * diff2
+                    value10 = value01
+                    value11 = cross_coeff * diff1 * diff1 + degree * re_m2 + full_diag
+                    value12 = cross_coeff * diff1 * diff2
+                    value20 = value02
+                    value21 = value12
+                    value22 = cross_coeff * diff2 * diff2 + degree * re_m2 + full_diag
+                    out[i, j] = value00
+                    out[i, ny + j] = value01
+                    out[i, 2 * ny + j] = value02
+                    out[nx + i, j] = value10
+                    out[nx + i, ny + j] = value11
+                    out[nx + i, 2 * ny + j] = value12
+                    out[2 * nx + i, j] = value20
+                    out[2 * nx + i, ny + j] = value21
+                    out[2 * nx + i, 2 * ny + j] = value22
+        return out
+
+else:
+    _divfree_gram_matrix_numba = None
+
+
+def divfree_gram_matrix(x: np.ndarray, y: np.ndarray, degree: int) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if x.ndim != 2 or y.ndim != 2 or x.shape[1] != y.shape[1]:
+        raise ValueError("x and y must be 2D arrays with matching column counts")
+    if x.shape[1] not in {2, 3}:
+        raise ValueError("divergence-free kernels are only supported in 2D and 3D")
+    if x.size == 0 or y.size == 0:
+        return np.zeros((x.shape[1] * x.shape[0], y.shape[1] * y.shape[0]), dtype=float)
+    if NUMBA_AVAILABLE:
+        return _divfree_gram_matrix_numba(x, y, int(degree))
+
+    dim = x.shape[1]
+    nx = x.shape[0]
+    ny = y.shape[0]
+    out = np.empty((dim * nx, dim * ny), dtype=float)
+    diff = x[:, None, :] - y[None, :, :]
+    re = np.sqrt(np.maximum(np.sum(diff * diff, axis=2), 0.0)) + np.finfo(float).eps
+    re_m2 = re ** (degree - 2)
+    cross_coeff = degree * (degree - 2) * (re ** (degree - 4))
+    full_diag = -degree * (degree + dim - 2) * re_m2
+    for a in range(dim):
+        for b in range(dim):
+            block = cross_coeff * diff[:, :, a] * diff[:, :, b]
+            if a == b:
+                block = block + degree * re_m2 + full_diag
+            out[a * nx : (a + 1) * nx, b * ny : (b + 1) * ny] = block
+    return out
