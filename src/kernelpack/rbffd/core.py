@@ -207,6 +207,16 @@ class RBFStencil:
         sp, op, apply_op, rhs_indices = args[:4]
         return self._compute_weights_interior(x, sp, op, apply_op, rhs_indices)
 
+    def compute_weights_at_points(self, x: np.ndarray, xe: np.ndarray, sp: StencilProperties, op: OpProperties, apply_op: str | Callable[..., np.ndarray]) -> np.ndarray:
+        self.initialize_geometry(x, sp)
+        xe = np.atleast_2d(np.asarray(xe, dtype=float))
+        r_rhs = distance_matrix(xe, x)
+        x_at_origin_subset = (xe - self.xm) / self.width
+        b = self._apply_operator(apply_op, sp, op, r_rhs, xe, x, x_at_origin_subset, self.xc)
+        if op.nosolve:
+            return b[: self.n].T
+        return self.stable_solve(self.solve_lhs, b)[: self.n].T
+
     def eval_weights(self, sp: StencilProperties, xe: np.ndarray) -> np.ndarray:
         xe = np.asarray(xe, dtype=float)
         if xe.size == 0:
@@ -402,6 +412,13 @@ class WeightedLeastSquaresStencil:
             return self._compute_weights_boundary(x, nr, float(neu_coeff), float(dir_coeff), sp, op, apply_op, rhs_indices)
         sp, op, apply_op, rhs_indices = args[:4]
         return self._compute_weights_interior(x, sp, op, apply_op, rhs_indices)
+
+    def compute_weights_at_points(self, x: np.ndarray, xe: np.ndarray, sp: StencilProperties, op: OpProperties, apply_op: str | Callable[..., np.ndarray]) -> np.ndarray:
+        self.initialize_geometry(x, sp)
+        xe = np.atleast_2d(np.asarray(xe, dtype=float))
+        x_at_origin_subset = self.xc[:1] if xe.shape[0] == 1 and np.allclose(xe[0], x[0]) else (xe - self.xm) / self.width
+        bpoly = self._apply_operator(apply_op, sp, op, None, xe, x, x_at_origin_subset, self.xc)
+        return (self.reconstructor.T @ bpoly).T
 
     def lap_op(self, _sp: StencilProperties, _op: OpProperties, _r_rhs: np.ndarray, _x_subset: np.ndarray, _x: np.ndarray, x_at_origin_subset: np.ndarray, _x_at_origin: np.ndarray) -> np.ndarray:
         total = np.zeros((x_at_origin_subset.shape[0], self.fit_npoly))
@@ -646,6 +663,52 @@ class FDODiffOp(FDDiffOp):
         self.locations = triplet_locations[:cursor]
         self.values = triplet_values[:cursor]
         self.recorded_stencil_globals = np.asarray(recorded_globals, dtype=int)
+
+
+@dataclass
+class CrossNodeDiffOp:
+    approx_factory: Callable[[], object] = RBFStencil
+    locations: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), dtype=int))
+    values: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    n1: int = 0
+    n2: int = 0
+
+    def assemble_op(self, source_domain: DomainDescriptor, target_domain: DomainDescriptor, op_name: str, st_props: StencilProperties, op_props: OpProperties, *, active_rows: np.ndarray | None = None) -> None:
+        target_points, target_row_ids, _, _ = _pick_centers(target_domain, st_props.point_set)
+        if active_rows is None:
+            active_rows = np.arange(1, target_points.shape[0] + 1)
+        active_rows = np.asarray(active_rows, dtype=int).reshape(-1)
+        source_points = source_domain.get_tree_points(st_props.tree_mode)
+        source_globals = source_domain.get_tree_globals(st_props.tree_mode)
+        self.n1 = int(target_row_ids.max(initial=0))
+        self.n2 = int(source_globals.max(initial=0))
+        knn_indices, _ = source_domain.query_knn(st_props.tree_mode, target_points[active_rows - 1], st_props.n)
+        knn_indices = np.asarray(knn_indices, dtype=int) + 1
+        triplet_count = active_rows.size * st_props.n
+        self.locations = np.zeros((triplet_count, 2), dtype=int)
+        self.values = np.zeros(triplet_count, dtype=float)
+        cursor = 0
+        for k, local_row in enumerate(active_rows):
+            center_point = target_points[local_row - 1 : local_row]
+            indices = knn_indices[k]
+            loc_x = source_points[indices - 1]
+            stencil = self.approx_factory()
+            w = stencil.compute_weights_at_points(loc_x, center_point, st_props, op_props, op_name)[0]
+            m = indices.size
+            next_cursor = cursor + m
+            self.locations[cursor:next_cursor, 0] = target_row_ids[local_row - 1]
+            self.locations[cursor:next_cursor, 1] = source_globals[indices - 1]
+            self.values[cursor:next_cursor] = w[:m]
+            cursor = next_cursor
+        self.locations = self.locations[:cursor]
+        self.values = self.values[:cursor]
+
+    def get_op(self) -> sparse.csr_matrix:
+        if self.locations.size == 0:
+            return sparse.csr_matrix((self.n1, self.n2))
+        rows = self.locations[:, 0] - 1
+        cols = self.locations[:, 1] - 1
+        return sparse.csr_matrix((self.values, (rows, cols)), shape=(self.n1, self.n2))
 
 
 def _assemble_one(

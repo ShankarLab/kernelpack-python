@@ -1,5 +1,6 @@
 from .diffusion import DiffusionSolver
 from .heterogeneous_multispecies_diffusion import HeterogeneousMultiSpeciesDiffusionSolver, HeterogeneousMultiSpeciesPUDiffusionSolver
+from .incompressible_euler import IncompressibleEulerSolver
 from .multispecies_diffusion import MultiSpeciesDiffusionSolver
 from .poisson import PoissonSolver
 from .nonlinear_variable_poisson import NonlinearVariablePoissonSolver
@@ -16,6 +17,7 @@ __all__ = [
     "VariablePoissonSolver",
     "NonlinearVariablePoissonSolver",
     "DiffusionSolver",
+    "IncompressibleEulerSolver",
     "MultiSpeciesDiffusionSolver",
     "HeterogeneousMultiSpeciesDiffusionSolver",
     "HeterogeneousMultiSpeciesPUDiffusionSolver",
